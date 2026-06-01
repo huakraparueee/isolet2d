@@ -3,7 +3,7 @@
 
 A **LÖVE 11.x** library for stacked isometric maps — terrain cubes, structures, and animated NPCs with depth sorting, viewport culling, and an event-driven mutation API.
 
-<img width="1207" height="679" alt="example" src="https://github.com/user-attachments/assets/25dad7d9-a5ca-44c8-bfb1-2531fd569486" />
+<img width="1207" height="679" alt="example" src="https://github.com/user-attachments/assets/c4e666bd-4980-4dbd-9ee9-3541e648234e" />
 
 ## Requirements
 
