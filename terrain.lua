@@ -1,5 +1,5 @@
 ﻿--[[
-  Island draw — terrain / structure / npc pieces in map.pieces
+  Pipeline step 2 — terrain pieces on tile_x, tile_y (draw + height/walkable cache).
 ]]
 
 local Stack = require("stack")
@@ -14,6 +14,28 @@ local Terrain = {}
 local mat_images = {}
 local mat_anims = {}
 local mat_sheets = {}
+local mat_variants = {}
+local mat_autotile = {}
+
+-- bitmask N=8 E=4 S=2 W=1 → variant name
+local MASK_TO_VARIANT = {
+    [0] = "solo",
+    [1] = "w",
+    [2] = "s",
+    [3] = "w_s",
+    [4] = "e",
+    [5] = "w_e",
+    [6] = "e_s",
+    [7] = "w_e_s",
+    [8] = "n",
+    [9] = "n_w",
+    [10] = "n_s",
+    [11] = "n_w_s",
+    [12] = "n_e",
+    [13] = "w_n_e",
+    [14] = "n_e_s",
+    [15] = "full",
+}
 
 local T
 local snap_px = IsoGround.snap_px
@@ -28,30 +50,87 @@ local function load_block_sprite(path)
     end
 
     local image = love.graphics.newImage(path)
-    local w, h = image:getWidth(), image:getHeight()
-
-    if w ~= h then
-        error(string.format("%s must be square, got %dx%d", path, w, h))
-    end
-
     image:setFilter("nearest", "nearest")
 
     return image
 end
 
-local function grid_frames(grid, cols)
+local function load_variant_entry(entry)
+    if type(entry) == "string" then
+        return load_block_sprite(entry)
+    end
+
+    if type(entry) ~= "table" then
+        return nil
+    end
+
+    local images = {}
+
+    for i, path in ipairs(entry) do
+        images[i] = load_block_sprite(path)
+    end
+
+    if #images == 0 then
+        return nil
+    end
+
+    if #images == 1 then
+        return images[1]
+    end
+
+    return images
+end
+
+local function pick_variant_image(entry, tile_x, tile_y)
+    if not entry then
+        return nil
+    end
+
+    if entry[1] then
+        local n = #entry
+
+        if n == 0 then
+            return nil
+        end
+
+        return entry[(tile_x + tile_y) % n + 1]
+    end
+
+    return entry
+end
+
+local function grid_frames(grid, cols, row)
+    row = row or 1
+
     if type(cols) == "number" then
-        return grid(cols, 1)
+        return grid(cols, row)
     end
 
     if type(cols) == "string" and not cols:find("-", 1, true) then
-        return grid(tonumber(cols), 1)
+        return grid(tonumber(cols), row)
     end
 
-    return grid(cols, 1)
+    return grid(cols, row)
 end
 
-local function load_mat_anim(id, spec)
+local STATIC_MODE = {
+    default = { cols = "1", interval = 1, pause = true },
+}
+
+local function make_mat_clip(grid, def)
+    local anim = anim8.newAnimation(
+        grid_frames(grid, def.cols, def.row or 1),
+        def.interval
+    )
+
+    if def.pause then
+        anim:pauseAtStart()
+    end
+
+    return anim
+end
+
+local function load_mat_sheet(id, spec)
     local path = spec.path
 
     if not path or not love.filesystem.getInfo(path) then
@@ -59,32 +138,54 @@ local function load_mat_anim(id, spec)
     end
 
     local image = love.graphics.newImage(path)
-    local w, h = image:getWidth(), image:getHeight()
-    local fw = spec.frame_w
-    local fh = spec.frame_h or fw
+    local iw, ih = image:getWidth(), image:getHeight()
+    local fw = spec.w
+    local fh = spec.h
 
     image:setFilter("nearest", "nearest")
 
-    local grid = anim8.newGrid(fw, fh, w, h)
-    local anim = anim8.newAnimation(
-        grid_frames(grid, spec.cols or "1-4"),
-        spec.interval or 0.15
-    )
+    local grid = anim8.newGrid(fw, fh, iw, ih)
+    local modes = spec.modes or STATIC_MODE
+    local templates = {}
+    local mode_names = {}
+
+    for mode, mode_def in pairs(modes) do
+        mode_names[#mode_names + 1] = mode
+        templates[mode] = make_mat_clip(grid, mode_def)
+    end
+
+    table.sort(mode_names)
+
+    local default_mode = modes.default and "default" or mode_names[1]
 
     mat_sheets[id] = {
         image = image,
-        frame_w = fw,
-        frame_h = fh,
+        w = fw,
+        h = fh,
+        default_mode = default_mode,
     }
-    mat_anims[id] = anim
+    mat_anims[id] = templates[default_mode]
 end
 
 function Terrain.load()
     sync_tile_size()
 
     for id, spec in pairs(Setup.get().terrain_mats) do
-        if spec.frame_w and spec.cols and not mat_anims[id] then
-            load_mat_anim(id, spec)
+        if spec.w and spec.h and not mat_sheets[id] then
+            load_mat_sheet(id, spec)
+        elseif spec.autotile and not mat_variants[id] then
+            mat_autotile[id] = true
+            mat_variants[id] = {}
+
+            if spec.variants then
+                for name, entry in pairs(spec.variants) do
+                    mat_variants[id][name] = load_variant_entry(entry)
+                end
+            end
+
+            if spec.path then
+                mat_variants[id]._default = load_variant_entry(spec.path)
+            end
         elseif spec.path and not mat_images[id] and not mat_anims[id] then
             mat_images[id] = load_block_sprite(spec.path)
         end
@@ -310,19 +411,194 @@ local function stack_mat_id(tile_z, top_z)
     return Setup.get().terrain_stack_fill
 end
 
-local function mat_sprite(tile_z, top_z, mat)
+local function top_mat_at(map, tile_x, tile_y)
+    local source = map.source
+    local height_cache = map.height_at_cache
+
+    if not height_cache then
+        return nil
+    end
+
+    local row = height_cache[tile_y]
+
+    if not row then
+        return nil
+    end
+
+    local h = row[tile_x]
+
+    if not h or h <= 0 then
+        return nil
+    end
+
+    return Stack.layer_mat(
+        source,
+        tile_y + 1,
+        tile_x + 1,
+        h - 1,
+        Setup.get().terrain_mats
+    )
+end
+
+local function top_z_at(map, tile_x, tile_y)
+    local height_cache = map.height_at_cache
+
+    if not height_cache then
+        return nil
+    end
+
+    local row = height_cache[tile_y]
+
+    if not row then
+        return nil
+    end
+
+    local h = row[tile_x]
+
+    if not h or h <= 0 then
+        return nil
+    end
+
+    return h - 1
+end
+
+local function piece_is_stack_top(map, piece)
+    local top_z = top_z_at(map, piece.tile_x, piece.tile_y)
+
+    if top_z == nil then
+        return false
+    end
+
+    return (piece.tile_z or 0) == top_z
+end
+
+local function mat_at_z(map, tile_x, tile_y, z)
+    local source = map.source
+    local height_cache = map.height_at_cache
+
+    if not height_cache then
+        return nil
+    end
+
+    local row = height_cache[tile_y]
+
+    if not row then
+        return nil
+    end
+
+    local h = row[tile_x]
+
+    if not h or h <= 0 or z < 0 or z >= h then
+        return nil
+    end
+
+    return Stack.layer_mat(
+        source,
+        tile_y + 1,
+        tile_x + 1,
+        z,
+        Setup.get().terrain_mats
+    )
+end
+
+local TRANSPARENT_NEIGHBOR_OFFS = {
+    { 0, -1 },
+    { 1, 0 },
+    { 0, 1 },
+    { -1, 0 },
+    { 1, -1 },
+    { 1, 1 },
+    { -1, 1 },
+    { -1, -1 },
+}
+
+local function mat_is_transparent(mat)
+    return Lookup.terrain_mat_alpha(Setup.get().terrain_mats, mat) < 1
+end
+
+local function piece_adjacent_to_transparent_mat(map, piece)
+    local tx = piece.tile_x
+    local ty = piece.tile_y
+    local z = piece.tile_z or 0
+
+    for _, off in ipairs(TRANSPARENT_NEIGHBOR_OFFS) do
+        local nmat = mat_at_z(map, tx + off[1], ty + off[2], z)
+
+        if nmat and mat_is_transparent(nmat) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function neighbor_same_mat_at_z(map, tile_x, tile_y, z, mat)
+    local source = map.source
+    local c = Setup.get()
+    local lx = tile_x - c.grid_origin_x
+    local ly = tile_y - c.grid_origin_y
+
+    if lx < 0 or lx >= source.tiles_w or ly < 0 or ly >= source.tiles_d then
+        return false
+    end
+
+    local nmat = mat_at_z(map, tile_x, tile_y, z)
+
+    return nmat ~= nil and nmat == mat
+end
+
+local function autotile_mask(map, tile_x, tile_y, mat, z)
+    local mask = 0
+
+    if neighbor_same_mat_at_z(map, tile_x, tile_y - 1, z, mat) then
+        mask = mask + 8
+    end
+
+    if neighbor_same_mat_at_z(map, tile_x + 1, tile_y, z, mat) then
+        mask = mask + 4
+    end
+
+    if neighbor_same_mat_at_z(map, tile_x, tile_y + 1, z, mat) then
+        mask = mask + 2
+    end
+
+    if neighbor_same_mat_at_z(map, tile_x - 1, tile_y, z, mat) then
+        mask = mask + 1
+    end
+
+    return mask
+end
+
+local function mat_sprite(map, tile_x, tile_y, tile_z, top_z, mat)
     local id = mat or stack_mat_id(tile_z, top_z)
+
+    if mat and mat_autotile[mat] and tile_z == top_z then
+        local variants = mat_variants[mat]
+
+        if variants then
+            local name = MASK_TO_VARIANT[autotile_mask(map, tile_x, tile_y, mat, tile_z)] or "solo"
+            local image = pick_variant_image(
+                variants[name] or variants._default,
+                tile_x,
+                tile_y
+            )
+
+            if image then
+                return image, image:getWidth(), image:getHeight(), nil
+            end
+        end
+    end
 
     if mat and mat_sheets[mat] then
         local sheet = mat_sheets[mat]
 
-        return sheet.image, sheet.frame_w, mat_anims[mat]
+        return sheet.image, sheet.w, sheet.h, mat_anims[mat]
     end
 
     local image = mat_images[id]
 
     if image then
-        return image, image:getWidth(), nil
+        return image, image:getWidth(), image:getHeight(), nil
     end
 
     if mat then
@@ -340,19 +616,20 @@ local function mat_sprite(tile_z, top_z, mat)
     end
 
     if image then
-        return image, image:getWidth(), nil
+        return image, image:getWidth(), image:getHeight(), nil
     end
 
     return nil
 end
 
-local function draw_block_sprite(lg, layout, image, block_px, tile_x, tile_y, tile_z, alpha, anim)
+local function draw_block_sprite(lg, layout, image, src_w, src_h, tile_x, tile_y, tile_z, alpha, anim)
     local scale = layout.scale or 1
     local tile_px = layout.tile_size * scale
     local cx, cy = IsoGround.tile_to_screen(layout, tile_x, tile_y, tile_z)
     local a = alpha or 1
-    local bp = block_px or image:getWidth()
-    local s = IsoGround.terrain_sprite_scale(tile_px, bp)
+    local fw = src_w or image:getWidth()
+    local fh = src_h or image:getHeight()
+    local s = IsoGround.terrain_sprite_scale(tile_px, fw)
     local draw_x = cx
     local draw_y = IsoGround.block_sprite_bottom_y(
         cy,
@@ -360,11 +637,13 @@ local function draw_block_sprite(lg, layout, image, block_px, tile_x, tile_y, ti
         layout.tile_size,
         layout.iso_y_ratio
     )
+    local ox = fw * 0.5
+    local oy = fh
 
     lg.setColor(1, 1, 1, a)
 
     if anim then
-        anim:draw(image, draw_x, draw_y, 0, s, s, bp * 0.5, bp)
+        anim:draw(image, draw_x, draw_y, 0, s, s, ox, oy)
         return
     end
 
@@ -375,8 +654,8 @@ local function draw_block_sprite(lg, layout, image, block_px, tile_x, tile_y, ti
         0,
         s,
         s,
-        bp * 0.5,
-        bp
+        ox,
+        oy
     )
 end
 
@@ -424,24 +703,25 @@ local function chunk_tile_bounds(cx, cy, source)
         math.min(min_ty + CHUNK_TILES - 1, source.tiles_d - 1)
 end
 
-local function piece_screen_bounds(layout, piece, top_z)
+local function piece_screen_bounds(layout, map, piece, top_z)
     local scale = layout.scale or 1
     local tile_px = layout.tile_size * scale
     local tx, ty, tz = piece.tile_x, piece.tile_y, piece.tile_z or 0
     local cx, cy = IsoGround.tile_to_screen(layout, tx, ty, tz)
-    local image, block_px, anim = mat_sprite(tz, top_z, piece.mat)
+    local image, src_w, src_h, anim = mat_sprite(map, tx, ty, tz, top_z, piece.mat)
 
     if image then
-        local bp = block_px or image:getWidth()
-        local s = IsoGround.terrain_sprite_scale(tile_px, bp)
+        local fw = src_w or image:getWidth()
+        local fh = src_h or image:getHeight()
+        local s = IsoGround.terrain_sprite_scale(tile_px, fw)
         local draw_y = IsoGround.block_sprite_bottom_y(
             cy,
             scale,
             layout.tile_size,
             layout.iso_y_ratio
         )
-        local hw = bp * s * 0.5
-        local hh = bp * s
+        local hw = fw * s * 0.5
+        local hh = fh * s
 
         return cx - hw, draw_y - hh, cx + hw, draw_y
     end
@@ -517,7 +797,11 @@ local function apply_bake_flags_in_layer(map, cx, cy, tile_z)
     end
 
     for i = 1, #pieces do
-        pieces[i].baked = piece_bakeable(pieces[i])
+        local piece = pieces[i]
+
+        piece.baked = piece_bakeable(piece)
+            and not piece_is_stack_top(map, piece)
+            and not piece_adjacent_to_transparent_mat(map, piece)
     end
 end
 
@@ -552,7 +836,7 @@ local function bake_chunk(map, cx, cy, tile_z)
 
     for _, piece in ipairs(pieces) do
         local top_z = top_z_from_cache(source, cache, piece.tile_x, piece.tile_y)
-        local x0, y0, x1, y1 = piece_screen_bounds(layout, piece, top_z)
+        local x0, y0, x1, y1 = piece_screen_bounds(layout, map, piece, top_z)
 
         world_min_x = math.min(world_min_x, x0)
         world_min_y = math.min(world_min_y, y0)
@@ -599,6 +883,7 @@ local function bake_chunk(map, cx, cy, tile_z)
             love.graphics,
             layout,
             cache,
+            map,
             tx,
             ty,
             tz,
@@ -859,30 +1144,54 @@ function Terrain.finish_piece_bake(map, piece)
     end
 end
 
+local REBAKE_NEIGHBOR_OFFS = {
+    { 0, 0 },
+    { 0, -1 },
+    { 1, 0 },
+    { 0, 1 },
+    { -1, 0 },
+    { 1, -1 },
+    { 1, 1 },
+    { -1, 1 },
+    { -1, -1 },
+}
+
 function Terrain.rebake_tile_now(map, tile_x, tile_y)
-    if is_terrain_animating(map, tile_x, tile_y) then
-        return
+    local floor_max_z = map.min_visible_z or 0
+    local dirty = {}
+
+    for _, off in ipairs(REBAKE_NEIGHBOR_OFFS) do
+        local tx = tile_x + off[1]
+        local ty = tile_y + off[2]
+
+        if is_terrain_animating(map, tx, ty) then
+            return
+        end
+
+        bump_bake_max_z(map, tx, ty)
+
+        local cx, cy = tile_chunk_index(tx, ty)
+
+        for tile_z = 0, floor_max_z do
+            dirty[cx .. "," .. cy .. "," .. tile_z] = { cx = cx, cy = cy, tile_z = tile_z }
+        end
     end
 
-    bump_bake_max_z(map, tile_x, tile_y)
-
-    local cx, cy = tile_chunk_index(tile_x, tile_y)
-    local floor_max_z = map.min_visible_z or 0
-
-    for tile_z = 0, floor_max_z do
-        rebake_layer_chunk(map, cx, cy, tile_z)
+    for _, entry in pairs(dirty) do
+        rebake_layer_chunk(map, entry.cx, entry.cy, entry.tile_z)
     end
 end
 
-function Terrain.draw_unit_cube(lg, layout, _cache, tile_x, tile_y, tile_z, rgb, alpha, top_z, mat)
-    local image, block_px, anim = mat_sprite(tile_z, top_z, mat)
+function Terrain.draw_unit_cube(lg, layout, _cache, map, tile_x, tile_y, tile_z, rgb, alpha, top_z, mat)
+    local image, src_w, src_h, anim = mat_sprite(map, tile_x, tile_y, tile_z, top_z, mat)
 
     if image then
         draw_block_sprite(
             lg,
             layout,
             image,
-            block_px,
+            src_w,
+            src_h,
             tile_x,
             tile_y,
             tile_z,

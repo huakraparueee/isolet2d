@@ -1,4 +1,3 @@
-
 # isolet2d
 
 A **LÖVE 11.x** library for stacked isometric maps — terrain cubes, structures, and animated NPCs with depth sorting, viewport culling, and an event-driven mutation API.
@@ -53,8 +52,8 @@ isolet2d/
 
 ## Documentation
 
-| Doc | Contents |
-|-----|----------|
+| Doc                        | Contents                                       |
+| -------------------------- | ---------------------------------------------- |
 | [docs/api.md](docs/api.md) | Config, map source, events, camera, map object |
 
 ## Third-party

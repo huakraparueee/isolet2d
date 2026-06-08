@@ -1,61 +1,83 @@
-﻿
-local anim8 = require("anim8")
+﻿local anim8 = require("anim8")
 local Setup = require("setup")
 local Lookup = require("lookup")
 local Footprint = require("footprint")
 local Walk = require("walk")
+local Placement = require("placement")
+local Tile = require("tile")
 local IsoGround = require("ground")
 
-local WALK_SPEED = 7
-local ARRIVE_DIST = 0.04
+local WALK_SPEED = 3
+local FACING_AXIS_EPS = 0.001
+local DIR8_VEC = {
+    e = { 1, 0 },
+    se = { 1, 1 },
+    s = { 0, 1 },
+    sw = { -1, 1 },
+    w = { -1, 0 },
+    nw = { -1, -1 },
+    n = { 0, -1 },
+    ne = { 1, -1 },
+}
 local T
 
-local function tile_center(tile_x, tile_y, tiles_w, tiles_d)
-    return tile_x + tiles_w * 0.5, tile_y + tiles_d * 0.5
+local function arrive_dist()
+    return IsoGround.pos_step() * 0.5
 end
 
-local function sync_pos_from_tiles(piece)
-    piece.pos_x, piece.pos_y = tile_center(
-        piece.tile_x,
-        piece.tile_y,
-        piece.tiles_w or 1,
-        piece.tiles_d or 1
+-- Scale px/py speed so screen travel matches ±x segments (e/w) for the same walkspeed.
+local function walk_speed_for_segment(map, walkspeed, seg_dx, seg_dy)
+    local seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+
+    if seg_len <= 0.0001 then
+        return walkspeed
+    end
+
+    local layout = map and map.layout
+
+    if not layout then
+        return walkspeed * (seg_len / IsoGround.pos_step())
+    end
+
+    local ux = seg_dx / seg_len
+    local uy = seg_dy / seg_len
+    local iso_x = layout.iso_x
+    local iso_y = layout.iso_y
+    local ref = math.sqrt(iso_x * iso_x + iso_y * iso_y)
+    local rate = math.sqrt(
+        (ux - uy) * (ux - uy) * iso_x * iso_x
+            + (ux + uy) * (ux + uy) * iso_y * iso_y
     )
-end
 
-local function sync_tiles_from_pos(piece)
-    local w = piece.tiles_w or 1
-    local d = piece.tiles_d or 1
+    if rate <= 0.0001 then
+        return walkspeed
+    end
 
-    piece.tile_x = math.floor(piece.pos_x - w * 0.5 + 0.0001)
-    piece.tile_y = math.floor(piece.pos_y - d * 0.5 + 0.0001)
-end
-
-local function path_waypoint_center(wp, tiles_w, tiles_d)
-    return {
-        x = wp.x + tiles_w * 0.5,
-        y = wp.y + tiles_d * 0.5,
-        z = wp.z,
-    }
+    return walkspeed * (ref / rate)
 end
 
 local catalogs = {}
 local set_mode
 
-local function grid_frames(grid, cols)
+local function grid_frames(grid, cols, row)
+    row = row or 1
+
     if type(cols) == "number" then
-        return grid(cols, 1)
+        return grid(cols, row)
     end
 
     if type(cols) == "string" and not cols:find("-", 1, true) then
-        return grid(tonumber(cols), 1)
+        return grid(tonumber(cols), row)
     end
 
-    return grid(cols, 1)
+    return grid(cols, row)
 end
 
 local function make_clip(grid, def)
-    local anim = anim8.newAnimation(grid_frames(grid, def.cols), def.interval)
+    local anim = anim8.newAnimation(
+        grid_frames(grid, def.cols, def.row or 1),
+        def.interval
+    )
 
     if def.pause then
         anim:pauseAtStart()
@@ -64,36 +86,86 @@ local function make_clip(grid, def)
     return anim
 end
 
+local function apply_flip(anim, flip)
+    if not flip then
+        return anim
+    end
+
+    if flip == "h" then
+        anim:flipH()
+    elseif flip == "v" then
+        anim:flipV()
+    elseif flip == "hv" or flip == "vh" then
+        anim:flipH()
+        anim:flipV()
+    else
+        error("dir flip must be 'h', 'v', or 'hv'")
+    end
+
+    return anim
+end
+
 local function load_sheet(spec)
     local path = spec.path
     local image = love.graphics.newImage(path)
-    local w, h = image:getWidth(), image:getHeight()
+    local iw, ih = image:getWidth(), image:getHeight()
 
-    if w ~= spec.sheet_w or h ~= spec.sheet_h then
-        error(
-            string.format(
-                "%s must be %dx%d, got %dx%d",
-                path,
-                spec.sheet_w,
-                spec.sheet_h,
-                w,
-                h
+    if spec.sheet_w and spec.sheet_h then
+        if iw ~= spec.sheet_w or ih ~= spec.sheet_h then
+            error(
+                string.format(
+                    "%s must be %dx%d, got %dx%d",
+                    path,
+                    spec.sheet_w,
+                    spec.sheet_h,
+                    iw,
+                    ih
+                )
             )
-        )
+        end
     end
 
     image:setFilter("nearest", "nearest")
 
-    local grid = anim8.newGrid(spec.w, spec.h, w, h)
+    local grid = anim8.newGrid(spec.w, spec.h, iw, ih)
     local templates = {}
     local mode_names = {}
+    local dir_modes = {}
 
     for mode, def in pairs(spec.modes) do
         mode_names[#mode_names + 1] = mode
-        local right = make_clip(grid, def)
+        if def.dirs then
+            dir_modes[mode] = {}
 
-        templates[mode .. "_right"] = right
-        templates[mode .. "_left"] = right:clone():flipH()
+            for dir_name, dir_def in pairs(def.dirs) do
+                if not DIR8_VEC[dir_name] then
+                    error(
+                        "unknown walk dir '"
+                            .. tostring(dir_name)
+                            .. "' (use e, se, s, sw, w, nw, n, ne)"
+                    )
+                end
+
+                local clip_def = {
+                    cols = dir_def.cols or def.cols,
+                    row = dir_def.row or 1,
+                    interval = dir_def.interval or def.interval,
+                    pause = def.pause,
+                    loop = def.loop,
+                }
+
+                local clip = make_clip(grid, clip_def)
+
+                apply_flip(clip, dir_def.flip)
+                templates[mode .. "_" .. dir_name] = clip
+                dir_modes[mode][dir_name] = true
+            end
+        else
+            local right = make_clip(grid, def)
+
+            templates[mode .. "_right"] = right
+            templates[mode .. "_left"] = right:clone():flipH()
+        end
     end
 
     table.sort(mode_names)
@@ -105,11 +177,116 @@ local function load_sheet(spec)
         modes = spec.modes,
         mode_names = mode_names,
         templates = templates,
+        dir_modes = dir_modes,
     }
 end
 
-local function clip_key(mode, facing)
-    return mode .. "_" .. facing
+local function clip_key(mode, clip_side)
+    return mode .. "_" .. clip_side
+end
+
+-- Unflipped sheet frames live under *_right; *_left is flipH. clip_side picks which to show.
+local function clip_facing(sprite_faces, facing)
+    if sprite_faces == facing then
+        return "right"
+    end
+
+    return "left"
+end
+
+local function facing_lr_for_step(dx, dy)
+    if dx == 0 and dy == 0 then
+        return nil
+    end
+
+    local screen_x = dx - dy
+
+    if math.abs(screen_x) <= FACING_AXIS_EPS then
+        if dy > 0 then
+            return "left"
+        end
+
+        if dy < 0 then
+            return "right"
+        end
+
+        if dx > 0 then
+            return "right"
+        end
+
+        if dx < 0 then
+            return "left"
+        end
+
+        return nil
+    end
+
+    if screen_x < 0 then
+        return "left"
+    end
+
+    return "right"
+end
+
+local function facing8_for_step(dx, dy)
+    if dx == 0 and dy == 0 then
+        return nil
+    end
+
+    -- 💡 หมายเหตุ: หากเกมของคุณใช้มุมมอง Isometric แบบ 2.5D และทิศทางยังเพี้ยนอยู่ 
+    -- ให้เปิดใช้งาน 3 บรรทัดด้านล่างนี้เพื่อแปลงเวกเตอร์เป็น Screen Space ก่อนคำนวณครับ
+    --[[
+    local isox = dx - dy
+    local isoy = (dx + dy) * 0.5
+    dx, dy = isox, isoy
+    --]]
+
+    for dir_name, vec in pairs(DIR8_VEC) do
+        if dx * vec[2] == dy * vec[1]
+            and (dx == 0 or (dx > 0) == (vec[1] > 0))
+            and (dy == 0 or (dy > 0) == (vec[2] > 0))
+        then
+            return dir_name
+        end
+    end
+
+    if math.abs(dx) >= math.abs(dy) then
+        if dx > 0 then
+            return dy >= 0 and "se" or "ne"
+        end
+
+        return dy >= 0 and "sw" or "nw"
+    end
+
+    if dy > 0 then
+        return dx >= 0 and "se" or "sw"
+    end
+
+    return dx >= 0 and "ne" or "nw"
+end
+
+local function facing_lr_for_facing(facing)
+    if facing == "left" or facing == "right" then
+        return facing
+    end
+
+    local vec = DIR8_VEC[facing]
+
+    if vec then
+        return facing_lr_for_step(vec[1], vec[2])
+    end
+
+    return "right"
+end
+
+local function clip_side_for_state(state)
+    local mode = state.mode
+
+    if state.catalog.dir_modes and state.catalog.dir_modes[mode] then
+        return state.facing
+    end
+
+    return clip_facing(state.sprite_faces, facing_lr_for_facing(state.facing))
 end
 
 local function mode_def(catalog, mode)
@@ -211,11 +388,19 @@ local function configure_playback(state, anim, playback)
 end
 
 local function apply_state(state)
-    local key = clip_key(state.mode, state.facing)
+    local key = clip_key(state.mode, clip_side_for_state(state))
     local template = state.catalog.templates[key]
 
     if not template then
-        error("unknown npc mode: " .. tostring(state.mode))
+        error(
+            "unknown npc clip: "
+                .. tostring(key)
+                .. " (mode "
+                .. tostring(state.mode)
+                .. ", facing "
+                .. tostring(state.facing)
+                .. ")"
+        )
     end
 
     local anim = template:clone()
@@ -243,15 +428,8 @@ local function begin_path_segment(state, piece, map, wp)
     state.seg_y0 = piece.pos_y
     state.seg_z0 = piece.tile_z
 
-    if state.seg_z0 == nil then
-        local w = piece.tiles_w or 1
-        local d = piece.tiles_d or 1
-
-        state.seg_z0 = Walk.surface_z(
-            map,
-            math.floor(piece.pos_x - w * 0.5 + 0.0001),
-            math.floor(piece.pos_y - d * 0.5 + 0.0001)
-        )
+    if state.seg_z0 == nil and wp then
+        state.seg_z0 = wp.z
         piece.tile_z = state.seg_z0
     end
 end
@@ -266,12 +444,11 @@ set_mode = function(state, mode, play_opts)
     apply_state(state)
 end
 
-local function finish_walk(state, piece)
+local function finish_walk(state, piece, map)
     if state.final_z ~= nil then
         piece.tile_z = state.final_z
     end
 
-    sync_tiles_from_pos(piece)
     clear_walk(state)
     set_mode(state, "stand")
 end
@@ -292,17 +469,29 @@ local function ensure_catalog(kind)
     return catalogs[kind]
 end
 
+local function npc_def(kind)
+    return Lookup.npc_spec(Setup.get().npcs, kind) or {}
+end
+
 local function spawn(opts)
     opts = opts or {}
 
     local kind = opts.kind or "r"
     local catalog = ensure_catalog(kind)
+    local def = npc_def(kind)
 
-    local facing = opts.facing or "right"
+    local sprite_faces = def.sprite_faces or "right"
+    local facing = opts.facing or def.facing or sprite_faces
     local mode = opts.mode or "stand"
 
-    if facing ~= "left" and facing ~= "right" then
-        error("npc facing must be 'left' or 'right'")
+    if sprite_faces ~= "left" and sprite_faces ~= "right" then
+        error("npc sprite_faces must be 'left' or 'right'")
+    end
+
+    if facing ~= "left" and facing ~= "right" and not DIR8_VEC[facing] then
+        error(
+            "npc facing must be 'left', 'right', or e/se/s/sw/w/nw/n/ne"
+        )
     end
 
     if not catalog.modes[mode] then
@@ -324,8 +513,10 @@ local function spawn(opts)
     local state = {
         kind = kind,
         catalog = catalog,
+        sprite_faces = sprite_faces,
         facing = facing,
         mode = mode,
+        walkspeed = opts.walkspeed or def.walkspeed or WALK_SPEED,
         anims = anims,
         current = nil,
         mode_busy = false,
@@ -343,14 +534,54 @@ local function set_facing(state, facing)
     end
 
     state.facing = facing
+
+    if state.path and state.mode == "walk" and not state.mode_busy then
+        local key = clip_key(state.mode, clip_side_for_state(state))
+        local anim = state.anims[key]
+
+        if anim and state.current then
+            anim.timer = state.current.timer
+            anim.position = state.current.position
+            anim.status = state.current.status
+
+            if anim.status ~= "playing" then
+                anim:resume()
+            end
+
+            state.current = anim
+            return
+        end
+    end
+
     apply_state(state)
+end
+
+local function facing_for_step(dx, dy, state)
+    if state and state.catalog.dir_modes and state.catalog.dir_modes.walk then
+        return facing8_for_step(dx, dy)
+    end
+
+    return facing_lr_for_step(dx, dy)
+end
+
+-- 🛠 แก้ไข: เปลี่ยนให้รับค่าเวกเตอร์ dx, dy ของทิศทางการเคลื่อนที่โดยตรง
+local function apply_segment_facing(state, dx, dy)
+    if not dx or not dy then
+        return
+    end
+
+    local facing = facing_for_step(dx, dy, state)
+
+    if facing then
+        set_facing(state, facing)
+    end
 end
 
 local function is_walking(state)
     return state.path ~= nil
 end
 
-local function walk_state_to(state, piece, map, tile_x, tile_y, tile_z)
+local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
     state.mode_busy = false
     state.mode_left = nil
     state.after_mode = nil
@@ -358,56 +589,55 @@ local function walk_state_to(state, piece, map, tile_x, tile_y, tile_z)
 
     local w = piece.tiles_w or 1
     local d = piece.tiles_d or 1
-    local from_x = math.floor(piece.pos_x - w * 0.5 + 0.0001)
-    local from_y = math.floor(piece.pos_y - d * 0.5 + 0.0001)
-    local path = Walk.find_path(map, from_x, from_y, tile_x, tile_y)
+    local goal_node = Placement.node_at_pos(map, goal_x, goal_y)
+
+    if goal_node then
+        goal_x = goal_node.px
+        goal_y = goal_node.py
+    end
+
+    local path = Walk.find_path_pos(map, piece.pos_x, piece.pos_y, goal_x, goal_y)
 
     if path == nil then
         set_mode(state, "stand")
         return false
     end
 
-    state.final_z = tile_z ~= nil and tile_z or Walk.surface_z(map, tile_x, tile_y)
+    local goal_tx = math.floor(goal_x - w * 0.5 + 0.0001)
+    local goal_ty = math.floor(goal_y - d * 0.5 + 0.0001)
+    goal_node = goal_node or Placement.node_at_pos(map, goal_x, goal_y)
+
+    state.final_z = tile_z ~= nil and tile_z or (
+        goal_node and goal_node.z or Walk.surface_z(map, goal_tx, goal_ty)
+    )
 
     if #path == 0 then
-        piece.tile_x = tile_x
-        piece.tile_y = tile_y
-        sync_pos_from_tiles(piece)
-        finish_walk(state, piece)
+        if goal_node then
+            goal_x = goal_node.px
+            goal_y = goal_node.py
+        end
+
+        piece.pos_x = goal_x
+        piece.pos_y = goal_y
+        piece.tile_z = state.final_z
+        finish_walk(state, piece, map)
         return true
     end
 
-    local centered = {}
-
-    for i, wp in ipairs(path) do
-        centered[i] = path_waypoint_center(wp, w, d)
+    if goal_node then
+        path[#path].x = goal_node.px
+        path[#path].y = goal_node.py
+        path[#path].z = state.final_z
     end
 
-    state.path = centered
+    state.path = path
     state.path_i = 1
-    begin_path_segment(state, piece, map, centered[1])
+    begin_path_segment(state, piece, map, path[1])
     set_mode(state, "walk")
+    
+    -- 🛠 แก้ไข: คำนวณทิศทางเริ่มต้นจากตำแหน่งปัจจุบันของตัวละครไปยัง Waypoint แรก
+    apply_segment_facing(state, path[1].x - piece.pos_x, path[1].y - piece.pos_y)
     return true
-end
-
-local function facing_for_step(dx, dy)
-    local screen_x = dx - dy
-
-    if screen_x < 0 then
-        return "left"
-    end
-
-    if screen_x > 0 then
-        return "right"
-    end
-
-    if dy > 0 then
-        return "left"
-    end
-
-    if dy < 0 then
-        return "right"
-    end
 end
 
 local function update_state(state, piece, map, dt)
@@ -420,7 +650,7 @@ local function update_state(state, piece, map, dt)
     local wp = state.path[state.path_i]
 
     if not wp then
-        finish_walk(state, piece)
+        finish_walk(state, piece, map)
         return
     end
 
@@ -430,14 +660,13 @@ local function update_state(state, piece, map, dt)
     local dy = wp.y - py
     local dist = math.sqrt(dx * dx + dy * dy)
 
-    if dist <= ARRIVE_DIST then
+    if dist <= arrive_dist() then
         piece.pos_x = wp.x
         piece.pos_y = wp.y
         piece.tile_z = wp.z
-        sync_tiles_from_pos(piece)
 
         if state.path_i >= #state.path then
-            finish_walk(state, piece)
+            finish_walk(state, piece, map)
             return
         end
 
@@ -446,18 +675,19 @@ local function update_state(state, piece, map, dt)
 
         if next_wp then
             begin_path_segment(state, piece, map, next_wp)
+            apply_segment_facing(state, next_wp.x - wp.x, next_wp.y - wp.y)
         end
 
         return
     end
 
-    local step = math.min(dist, WALK_SPEED * dt)
-    piece.pos_x = px + (dx / dist) * step
-    piece.pos_y = py + (dy / dist) * step
-
     local seg_dx = wp.x - state.seg_x0
     local seg_dy = wp.y - state.seg_y0
     local seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+    local speed = walk_speed_for_segment(map, state.walkspeed, seg_dx, seg_dy)
+    local step = math.min(dist, speed * dt)
+    piece.pos_x = px + (dx / dist) * step
+    piece.pos_y = py + (dy / dist) * step
     local moved_x = piece.pos_x - state.seg_x0
     local moved_y = piece.pos_y - state.seg_y0
     local moved = math.sqrt(moved_x * moved_x + moved_y * moved_y)
@@ -468,12 +698,6 @@ local function update_state(state, piece, map, dt)
     end
 
     piece.tile_z = state.seg_z0 + (wp.z - state.seg_z0) * t
-
-    local facing = facing_for_step(dx, dy)
-
-    if facing then
-        set_facing(state, facing)
-    end
 end
 
 local function want_id(npc_id, filter)
@@ -516,8 +740,8 @@ function Npc.apply_facing(piece, facing)
     end
 end
 
-function Npc.facing_for_delta(dx, dy)
-    return facing_for_step(dx, dy)
+function Npc.facing_for_delta(dx, dy, state)
+    return facing_for_step(dx, dy, state)
 end
 
 function Npc.clear_piece_walk(piece)
@@ -587,12 +811,6 @@ end
 function Npc.add(map, piece, ev)
     Npc.sync_footprint(map, piece, ev.kind, ev)
 
-    local w, d = piece.tiles_w, piece.tiles_d
-
-    piece.tile_x = ev.tile_x
-    piece.tile_y = ev.tile_y
-    piece.tile_z = Walk.surface_z(map, ev.tile_x, ev.tile_y)
-
     piece.npc = spawn({
         kind = ev.kind,
         facing = ev.facing,
@@ -604,7 +822,15 @@ function Npc.add(map, piece, ev)
         },
     })
 
-    sync_pos_from_tiles(piece)
+    -- pipeline step 5: npc feet on placement node
+    if not Placement.spawn_at(map, piece, ev.tile_x, ev.tile_y) then
+        error(
+            "npc.add: no placement node at "
+                .. tostring(ev.tile_x)
+                .. ","
+                .. tostring(ev.tile_y)
+        )
+    end
 end
 
 function Npc.set_mode(map, mode, id_filter, play_opts)
@@ -628,9 +854,53 @@ function Npc.walk_to(map, tile_x, tile_y, id_filter, tile_z)
         if piece.npc
             and want_id(piece.npc_id, id_filter)
         then
-            walk_state_to(piece.npc, piece, map, tile_x, tile_y, tile_z)
+            local w = piece.tiles_w or 1
+            local d = piece.tiles_d or 1
+            local node = Placement.node_for_footprint(map, tile_x, tile_y, w, d)
+
+            if node then
+                walk_state_to_pos(
+                    piece.npc,
+                    piece,
+                    map,
+                    node.px,
+                    node.py,
+                    tile_z or node.z
+                )
+            end
         end
     end
+end
+
+function Npc.walk_to_pos(map, pos_x, pos_y, id_filter, tile_z)
+    if not map.pieces then
+        return
+    end
+
+    for _, piece in ipairs(map.pieces) do
+        if piece.npc
+            and want_id(piece.npc_id, id_filter)
+        then
+            walk_state_to_pos(piece.npc, piece, map, pos_x, pos_y, tile_z)
+        end
+    end
+end
+
+function Npc.is_anim_busy(map, id_filter)
+    if not map.pieces then
+        return false
+    end
+
+    for _, piece in ipairs(map.pieces) do
+        if piece.npc
+            and want_id(piece.npc_id, id_filter)
+            and piece.npc.mode_busy
+        then
+            return true
+        end
+    end
+
+    return false
 end
 
 function Npc.is_busy(map)
@@ -682,9 +952,21 @@ function Npc.draw(piece, lg, layout, alpha, z_at)
 
     local scale = layout.scale or 1
     alpha = alpha or 1
-    local w, d = Npc.npc_tile_span(piece)
-    local feet_x, feet_y =
-        Footprint.feet_screen_from_piece(layout, piece, w, d, z_at)
+    local feet_x, feet_y
+
+    if piece.pos_x ~= nil and piece.pos_y ~= nil then
+        feet_x, feet_y = Tile.placement_to_screen(
+            layout,
+            piece.pos_x,
+            piece.pos_y,
+            piece.tile_z
+        )
+    else
+        local w, d = Npc.npc_tile_span(piece)
+        feet_x, feet_y =
+            Footprint.feet_screen_from_piece(layout, piece, w, d, z_at)
+    end
+
     local draw_ox = piece.draw_offset_x or 0
     local draw_oy = piece.draw_offset_y or 0
 

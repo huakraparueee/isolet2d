@@ -6,6 +6,7 @@
 local Occupancy = require("occupancy")
 local Pieces = require("pieces")
 local Terrain = require("terrain")
+local Structure = require("structure")
 
 local Events = {}
 
@@ -75,6 +76,7 @@ local function terrain_add(map, ev)
 
     map.pieces[#map.pieces + 1] = piece
     map.refresh_height_at(ev.tile_x, ev.tile_y)
+    Terrain.rebake_tile_now(map, ev.tile_x, ev.tile_y)
 
     local h = grid(map).height_at(ev.tile_x, ev.tile_y)
     local top_z = h > 0 and h - 1 or 0
@@ -94,9 +96,6 @@ local function npc_add(map, ev)
 
     local piece = {
         npc_id = ev.id,
-        tile_x = ev.tile_x,
-        tile_y = ev.tile_y,
-        tile_z = grid(map).surface_z(ev.tile_x, ev.tile_y),
         alpha = 1,
     }
 
@@ -155,6 +154,15 @@ local function structure_add(map, ev)
     }
     map.structure_pieces = map.structure_pieces or {}
     map.structure_pieces[#map.structure_pieces + 1] = map.pieces[#map.pieces]
+    Structure.init_piece(map.pieces[#map.pieces], ev)
+
+    if map.rebuild_placement_tile then
+        for _, cell in ipairs(
+            Occupancy.footprint_cells(map, ev.tile_x, ev.tile_y, kind)
+        ) do
+            map.rebuild_placement_tile(cell.tile_x, cell.tile_y)
+        end
+    end
 end
 
 local function structure_remove(map, ev)
@@ -198,14 +206,43 @@ local function npc_set_mode(map, ev)
     })
 end
 
-local function npc_walk_to(map, ev)
+local function structure_set_mode(map, ev)
+    if not ev.mode then
+        error("structure.set_mode requires mode")
+    end
+
     queue_op(map, {
-        type = "npc.walk_to",
-        tile_x = ev.tile_x,
-        tile_y = ev.tile_y,
-        id = ev.id or ev.npc_id,
-        tile_z = grid(map).surface_z(ev.tile_x, ev.tile_y),
+        type = "structure.set_mode",
+        mode = ev.mode,
+        id = ev.id or ev.structure_id,
+        opts = {
+            loop = ev.loop,
+            count = ev.count,
+            after_mode = ev.after_mode,
+        },
     })
+end
+
+local function npc_walk_to(map, ev)
+    local op = {
+        type = "npc.walk_to",
+        id = ev.id or ev.npc_id,
+    }
+
+    if ev.pos_x ~= nil and ev.pos_y ~= nil then
+        local tx = math.floor(ev.pos_x + 0.0001)
+        local ty = math.floor(ev.pos_y + 0.0001)
+
+        op.pos_x = ev.pos_x
+        op.pos_y = ev.pos_y
+        op.tile_z = grid(map).surface_z(tx, ty)
+    else
+        op.tile_x = ev.tile_x
+        op.tile_y = ev.tile_y
+        op.tile_z = grid(map).surface_z(ev.tile_x, ev.tile_y)
+    end
+
+    queue_op(map, op)
 end
 
 local function copy_color(rgb)
@@ -410,6 +447,7 @@ local HANDLERS = {
     ["terrain.remove"] = terrain_remove,
     ["structure.add"] = structure_add,
     ["structure.remove"] = structure_remove,
+    ["structure.set_mode"] = structure_set_mode,
     ["npc.add"] = npc_add,
     ["npc.set_mode"] = npc_set_mode,
     ["npc.walk_to"] = npc_walk_to,
@@ -578,6 +616,7 @@ local function update_terrain_removals(map, dt)
 
     local kept = {}
     local removed_tiles = {}
+    local placement_tiles = {}
 
     for _, piece in ipairs(map.pieces) do
         if piece._removed then
@@ -586,6 +625,17 @@ local function update_terrain_removals(map, dt)
                     piece.tile_x,
                     piece.tile_y,
                 }
+            elseif Structure.is_piece(piece) then
+                for _, cell in ipairs(
+                    Occupancy.footprint_cells(
+                        map,
+                        piece.tile_x,
+                        piece.tile_y,
+                        piece.structure
+                    )
+                ) do
+                    placement_tiles[#placement_tiles + 1] = cell
+                end
             end
         else
             kept[#kept + 1] = piece
@@ -598,6 +648,12 @@ local function update_terrain_removals(map, dt)
 
     for _, tile in ipairs(removed_tiles) do
         map.refresh_height_at(tile[1], tile[2])
+    end
+
+    if map.rebuild_placement_tile then
+        for _, cell in ipairs(placement_tiles) do
+            map.rebuild_placement_tile(cell.tile_x, cell.tile_y)
+        end
     end
 
     if #removed_tiles > 0 then

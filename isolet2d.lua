@@ -4,13 +4,17 @@
 
 local Stack = require("stack")
 local Ground = require("ground")
+local Tile = require("tile")
 local Events = require("events")
 local Setup = require("setup")
 local Lookup = require("lookup")
 local Pieces = require("pieces")
 local Terrain = require("terrain")
 local Npc = require("npc")
+local Walk = require("walk")
+local Placement = require("placement")
 local Structure = require("structure")
+local Occupancy = require("occupancy")
 local Camera = require("camera")
 local Footprint = require("footprint")
 
@@ -37,6 +41,10 @@ function M.init(raw)
     Terrain.load()
     Npc.load()
     Structure.load()
+
+    if raw.grid_point_per_tile then
+        Ground.set_grid_point_per_tile(raw.grid_point_per_tile)
+    end
 end
 
 local function cfg()
@@ -58,7 +66,7 @@ function M.layout_for(src)
     Stack.dims(src)
     local c = cfg()
 
-    return Ground.layout({
+    return Tile.layout({
         design_width = c.design_width,
         design_height = c.design_height,
         tiles_w = src.tiles_w,
@@ -241,6 +249,11 @@ function M.bind_grid(map, src)
 
     map.refresh_height_at = function(tile_x, tile_y)
         refresh_height_at(map, src, tile_x, tile_y)
+        Placement.rebuild_tile(map, tile_x, tile_y)
+    end
+
+    map.rebuild_placement_tile = function(tile_x, tile_y)
+        Placement.rebuild_tile(map, tile_x, tile_y)
     end
 
     map.sync_structure_pieces = function()
@@ -279,17 +292,27 @@ end
 function M.create_map(src)
     Stack.dims(src)
 
+    -- 1. tile screen layout
+    local layout = M.layout_for(src)
+
+    -- 2. terrain pieces on tile grid
     local map = {
         source = src,
+        layout = layout,
         pieces = Terrain.initial_pieces(src, in_bounds_for),
-        layout = M.layout_for(src),
         pieces_updates = nil,
         pieces_removals = nil,
         pending_ops = nil,
     }
 
     M.bind_grid(map, src)
+
+    -- 3. structure list (pieces added via events hold tile_x, tile_y)
     sync_structure_pieces(map)
+
+    -- 4. placement graph from terrain + structure
+    Placement.rebuild(map)
+
     sync_npc_pieces(map)
     Terrain.build_bake(map)
 
@@ -302,6 +325,42 @@ end
 
 function M.is_blocked()
     return M.is_busy() or Npc.is_busy(active_map())
+end
+
+function M.is_npc_anim_busy(id)
+    return Npc.is_anim_busy(active_map(), id)
+end
+
+function M.pos_step()
+    return Ground.pos_step()
+end
+
+function M.pick_placement_near(px, py, radius)
+    return Walk.pick_reachable_near(active_map(), px, py, radius)
+end
+
+function M.try_step_neighbor(from_px, from_py, cell_dx, cell_dy)
+    return Walk.try_step_neighbor(
+        active_map(),
+        from_px,
+        from_py,
+        cell_dx,
+        cell_dy
+    )
+end
+
+function M.on_walkable_cell(piece)
+    return Placement.on_walkable_cell(active_map(), piece)
+end
+
+function M.can_step_pos(from_px, from_py, to_px, to_py)
+    return Walk.can_step_pos(
+        active_map(),
+        from_px,
+        from_py,
+        to_px,
+        to_py
+    )
 end
 
 function M.preload_npcs(_src)
@@ -407,7 +466,7 @@ local function foreach_sum_bucket_sorted(buckets, min_sum, max_sum, fn)
     end
 end
 
-local function draw_layer_entry(lg, layout, source, cache, entry)
+local function draw_layer_entry(lg, layout, source, cache, map, entry)
     if entry.type == "chunk" then
         love.graphics.setColor(1, 1, 1, 1)
         love.graphics.draw(entry.chunk.canvas, entry.chunk.x, entry.chunk.y)
@@ -423,6 +482,7 @@ local function draw_layer_entry(lg, layout, source, cache, entry)
             lg,
             layout,
             cache,
+            map,
             tx,
             ty,
             tz,
@@ -593,7 +653,7 @@ local function tile_rect_for_viewport(layout, viewport, pad)
         return nil
     end
 
-    local min_tx, min_ty, max_tx, max_ty = Ground.visible_tile_rect(
+    local min_tx, min_ty, max_tx, max_ty = Tile.visible_rect(
         layout,
         viewport.x,
         viewport.y,
@@ -713,6 +773,65 @@ local function terrain_draw_max_z(map, source, cache)
     return max_z
 end
 
+local function draw_placement_debug(map, lg, layout, view_rect)
+    if not cfg().debug_draw_walkable or not view_rect then
+        return
+    end
+
+    local placement = map.placement
+
+    if not placement then
+        return
+    end
+
+    local r = math.max(1, math.floor((layout.tile_size or 64) * (layout.scale or 1) * 0.02 + 0.5))
+
+    lg.setColor(0.2, 1, 0.35, 0.55)
+
+    for _, node in ipairs(placement.nodes) do
+        if node.tile_x >= view_rect.min_tx
+            and node.tile_x <= view_rect.max_tx
+            and node.tile_y >= view_rect.min_ty
+            and node.tile_y <= view_rect.max_ty
+        then
+            lg.circle("fill", node.sx, node.sy, r)
+        end
+    end
+end
+
+local function draw_npc_pos_debug(map, lg, layout, view_rect)
+    if not cfg().debug_draw_walkable or not view_rect then
+        return
+    end
+
+    local ts = layout.tile_size * (layout.scale or 1)
+    local r = math.max(2, math.floor(ts * 0.04 + 0.5))
+
+    lg.setColor(1, 0.15, 0.15, 0.9)
+
+    for _, piece in ipairs(map.npc_pieces or {}) do
+        if piece.npc and piece.pos_x ~= nil and piece.pos_y ~= nil then
+            local anchor_tx = math.floor(piece.pos_x)
+            local anchor_ty = math.floor(piece.pos_y)
+
+            if anchor_tx >= view_rect.min_tx
+                and anchor_tx <= view_rect.max_tx
+                and anchor_ty >= view_rect.min_ty
+                and anchor_ty <= view_rect.max_ty
+            then
+                local sx, sy = Placement.pos_to_screen(
+                layout,
+                piece.pos_x,
+                piece.pos_y,
+                piece.tile_z
+            )
+
+                lg.circle("fill", sx, sy, r)
+            end
+        end
+    end
+end
+
 function M.draw_map()
     if not current_map then
         return
@@ -807,10 +926,21 @@ function M.draw_map()
     end
 
     foreach_sum_bucket_sorted(buckets, min_sum, max_sum, function(entry)
-        draw_layer_entry(lg, layout, source, cache, entry)
+        draw_layer_entry(lg, layout, source, cache, current_map, entry)
     end)
 
+    draw_placement_debug(current_map, lg, layout, view_rect)
+    draw_npc_pos_debug(current_map, lg, layout, view_rect)
+
     love.graphics.pop()
+end
+
+function M.set_debug_draw_walkable(enable)
+    cfg().debug_draw_walkable = enable and true or false
+end
+
+function M.debug_draw_walkable()
+    return cfg().debug_draw_walkable == true
 end
 
 local function map_pan_bounds(src, layout)
@@ -836,7 +966,7 @@ local function map_pan_bounds(src, layout)
         )
 
         for z = 0, top_z do
-            local x0, y0, x1, y1 = Ground.tile_screen_bounds(layout, tx, ty, z)
+            local x0, y0, x1, y1 = Tile.bounds(layout, tx, ty, z)
 
             min_x = math.min(min_x, x0)
             min_y = math.min(min_y, y0)
@@ -872,6 +1002,16 @@ function M.find_by_id(id)
     return Npc.find_by_id(active_map(), id)
 end
 
+function M.each_npc_piece(fn)
+    if not fn then
+        return
+    end
+
+    for _, piece in ipairs(active_map().npc_pieces or {}) do
+        fn(piece)
+    end
+end
+
 local function apply_pending_ops(map, ops)
     if not ops then
         return
@@ -882,8 +1022,14 @@ local function apply_pending_ops(map, ops)
             Npc.add(map, op.piece, op.ev)
         elseif op.type == "npc.set_mode" then
             Npc.set_mode(map, op.mode, op.id, op.opts)
+        elseif op.type == "structure.set_mode" then
+            Structure.set_mode(map, op.mode, op.id, op.opts)
         elseif op.type == "npc.walk_to" then
-            Npc.walk_to(map, op.tile_x, op.tile_y, op.id, op.tile_z)
+            if op.pos_x ~= nil and op.pos_y ~= nil then
+                Npc.walk_to_pos(map, op.pos_x, op.pos_y, op.id, op.tile_z)
+            else
+                Npc.walk_to(map, op.tile_x, op.tile_y, op.id, op.tile_z)
+            end
         end
     end
 end
@@ -912,6 +1058,7 @@ function M.tick(dt)
     M.update(dt)
     flush_pending_ops()
     Terrain.update(dt)
+    Structure.update(map, dt)
     Npc.update(map, dt)
 end
 

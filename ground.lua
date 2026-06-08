@@ -1,5 +1,7 @@
-
 local M = {}
+
+local GRID_POINT_PER_TILE = 2
+local POS_STEP = 1 / GRID_POINT_PER_TILE
 
 function M.snap_px(n)
     return math.floor(n + 0.5)
@@ -96,6 +98,27 @@ function M.tile_screen_bounds(layout, tile_x, tile_y, tile_z)
     local eh = M.eh_for_tile_span(tile_px, layout.iso_eh_ratio)
 
     return cx - hw, cy - eh - hd, cx + hw, cy + hd
+end
+
+function M.set_grid_point_per_tile(n)
+    if type(n) ~= "number" or n < 1 or n ~= math.floor(n) then
+        error("ground: grid_point_per_tile must be a positive integer")
+    end
+
+    GRID_POINT_PER_TILE = n
+    POS_STEP = 1 / GRID_POINT_PER_TILE
+end
+
+function M.grid_point_per_tile()
+    return GRID_POINT_PER_TILE
+end
+
+function M.pos_step()
+    return POS_STEP
+end
+
+function M.placement_pos(ix, iy)
+    return (ix + 0.5) * POS_STEP, (iy + 0.5) * POS_STEP
 end
 
 function M.tile_to_screen(layout, tile_x, tile_y, tile_z)

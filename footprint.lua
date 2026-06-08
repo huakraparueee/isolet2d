@@ -12,10 +12,6 @@ function M.origin(piece, tiles_w, tiles_d)
         return piece.pos_x - tiles_w * 0.5, piece.pos_y - tiles_d * 0.5
     end
 
-    if piece.tile_x ~= nil and piece.tile_y ~= nil then
-        return piece.tile_x, piece.tile_y
-    end
-
     return 0, 0
 end
 
