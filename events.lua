@@ -5,6 +5,7 @@
 
 local Terrain = require("terrain")
 local Structure = require("structure")
+local Npc = require("npc")
 
 local Events = {}
 
@@ -215,6 +216,22 @@ local function structure_set_mode(map, ev)
             after_mode = ev.after_mode,
         },
     })
+end
+
+local function projectile_spawn(map, ev)
+    queue_op(map, { type = "projectile.spawn", ev = ev })
+end
+
+local function npc_remove(map, ev)
+    queue_op(map, {
+        type = "npc.remove",
+        id = ev.id or ev.npc_id,
+        duration = ev.duration,
+    })
+end
+
+local function npc_shoot(map, ev)
+    queue_op(map, { type = "npc.shoot", ev = ev })
 end
 
 local function npc_walk_to(map, ev)
@@ -445,6 +462,9 @@ local HANDLERS = {
     ["npc.add"] = npc_add,
     ["npc.set_mode"] = npc_set_mode,
     ["npc.walk_to"] = npc_walk_to,
+    ["npc.shoot"] = npc_shoot,
+    ["npc.remove"] = npc_remove,
+    ["projectile.spawn"] = projectile_spawn,
 }
 
 local function run_event(map, ev)
@@ -584,6 +604,8 @@ local function update_terrain_removals(map, dt)
 
         if job.structure_id then
             piece = Structure.find_by_id(map, job.structure_id)
+        elseif job.npc_id then
+            piece = Npc.find_by_id(map, job.npc_id)
         elseif not piece or piece._removed then
             piece = Terrain.find_at(
                 map,

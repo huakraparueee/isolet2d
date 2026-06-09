@@ -11,6 +11,7 @@ local Npc = require("npc")
 local Path = require("path")
 local Placement = require("placement")
 local Structure = require("structure")
+local Projectile = require("projectile")
 local Camera = require("camera")
 
 local M = {
@@ -36,6 +37,7 @@ function M.init(raw)
     Terrain.load()
     Npc.load()
     Structure.load()
+    Projectile.load()
 
     if raw.grid_point_per_tile then
         Placement.set_grid_point_per_tile(raw.grid_point_per_tile)
@@ -68,6 +70,7 @@ function M.layout_for(src)
         tiles_d = src.tiles_d,
         grid_origin_x = c.grid_origin_x,
         grid_origin_y = c.grid_origin_y,
+        map_offset_y = src.map_offset_y or c.map_offset_y or 0,
         tile_size = c.tile_size,
         iso_x_ratio = c.iso_x_ratio,
         iso_y_ratio = c.iso_y_ratio,
@@ -316,7 +319,7 @@ function M.is_busy()
 end
 
 function M.is_blocked()
-    return M.is_busy() or Npc.is_busy(active_map())
+    return M.is_busy() or Npc.is_busy(active_map()) or Projectile.is_busy(active_map())
 end
 
 function M.is_npc_anim_busy(id)
@@ -824,6 +827,16 @@ function M.draw_map()
         draw_layer_entry(lg, layout, source, cache, current_map, entry)
     end)
 
+    lg.setColor(1, 1, 1, 1)
+    for _, proj in ipairs(current_map.projectiles or {}) do
+        local tx = math.floor(proj.px + 0.0001)
+        local ty = math.floor(proj.py + 0.0001)
+
+        if tile_in_rect(tx, ty, view_rect) then
+            Projectile.draw(proj, lg, layout)
+        end
+    end
+
     draw_placement_debug(current_map, lg, layout, view_rect)
     draw_npc_pos_debug(current_map, lg, layout, view_rect)
 
@@ -882,15 +895,17 @@ function M.load_map(src)
     local min_x, min_y, max_x, max_y = map_pan_bounds(src, current_map.layout)
 
     local c = cfg()
+    local oy = current_map.layout.map_offset_y or 0
 
     Camera.set_bounds({
         min_x = min_x,
-        min_y = min_y,
+        min_y = min_y - oy,
         max_x = max_x,
-        max_y = max_y,
+        max_y = max_y - oy,
         view_w = c.design_width,
         view_h = c.design_height,
     })
+    Camera.reset()
 end
 
 function M.find_by_id(id)
@@ -942,6 +957,12 @@ local function apply_pending_ops(map, ops)
             else
                 Npc.walk_to(map, op.tile_x, op.tile_y, op.id, op.tile_z)
             end
+        elseif op.type == "projectile.spawn" then
+            Projectile.spawn(map, op.ev)
+        elseif op.type == "npc.shoot" then
+            Projectile.shoot_from_npc(map, op.ev)
+        elseif op.type == "npc.remove" then
+            Npc.remove(map, op.id, { duration = op.duration })
         end
     end
 end
@@ -968,6 +989,7 @@ function M.tick(dt)
     local map = active_map()
 
     M.update(dt)
+    Projectile.update(map, dt)
     flush_pending_ops()
     Terrain.update(dt)
     Structure.update(map, dt)

@@ -125,6 +125,7 @@ local mat_anims = {}
 local mat_sheets = {}
 local mat_variants = {}
 local mat_autotile = {}
+local mat_pick_opts = {}
 
 -- bitmask N=8 E=4 S=2 W=1 → variant name
 local MASK_TO_VARIANT = {
@@ -184,6 +185,208 @@ local function load_block_sprite(path)
     return image
 end
 
+local function variant_hash(tile_x, tile_y)
+    return (tile_x * 73856093 + tile_y * 19349663) % 2147483647
+end
+
+local SIMPLEX_F2 = 0.5 * (math.sqrt(3.0) - 1.0)
+local SIMPLEX_G2 = (3.0 - math.sqrt(3.0)) / 6.0
+
+local SIMPLEX_GRAD2 = {
+    { 1, 1 },
+    { -1, 1 },
+    { 1, -1 },
+    { -1, -1 },
+    { 1, 0 },
+    { -1, 0 },
+    { 0, 1 },
+    { 0, -1 },
+}
+
+local function mat_seed(id)
+    local h = 0
+
+    for i = 1, #id do
+        h = (h * 31 + id:byte(i)) % 2147483647
+    end
+
+    return h
+end
+
+local function build_simplex_perm(seed)
+    local p = {}
+
+    for i = 0, 255 do
+        p[i] = i
+    end
+
+    local state = seed % 2147483647
+
+    for i = 255, 1, -1 do
+        state = (state * 1103515245 + 12345) % 2147483647
+        local j = state % (i + 1)
+        p[i], p[j] = p[j], p[i]
+    end
+
+    local perm = {}
+
+    for i = 0, 511 do
+        perm[i] = p[i % 256]
+    end
+
+    return perm
+end
+
+local function simplex_dot2(g, x, y)
+    return g[1] * x + g[2] * y
+end
+
+local function simplex2(x, y, perm)
+    local s = (x + y) * SIMPLEX_F2
+    local i = math.floor(x + s)
+    local j = math.floor(y + s)
+    local t = (i + j) * SIMPLEX_G2
+    local x0 = x - (i - t)
+    local y0 = y - (j - t)
+    local i1
+    local j1
+
+    if x0 > y0 then
+        i1 = 1
+        j1 = 0
+    else
+        i1 = 0
+        j1 = 1
+    end
+
+    local x1 = x0 - i1 + SIMPLEX_G2
+    local y1 = y0 - j1 + SIMPLEX_G2
+    local x2 = x0 - 1 + 2 * SIMPLEX_G2
+    local y2 = y0 - 1 + 2 * SIMPLEX_G2
+    local ii = i % 256
+    local jj = j % 256
+    local gi0 = perm[ii + perm[jj]] % 8
+    local gi1 = perm[ii + i1 + perm[jj + j1]] % 8
+    local gi2 = perm[ii + 1 + perm[jj + 1]] % 8
+    local n0 = 0
+    local n1 = 0
+    local n2 = 0
+    local t0 = 0.5 - x0 * x0 - y0 * y0
+
+    if t0 >= 0 then
+        t0 = t0 * t0
+        n0 = t0 * t0 * simplex_dot2(SIMPLEX_GRAD2[gi0 + 1], x0, y0)
+    end
+
+    local t1 = 0.5 - x1 * x1 - y1 * y1
+
+    if t1 >= 0 then
+        t1 = t1 * t1
+        n1 = t1 * t1 * simplex_dot2(SIMPLEX_GRAD2[gi1 + 1], x1, y1)
+    end
+
+    local t2 = 0.5 - x2 * x2 - y2 * y2
+
+    if t2 >= 0 then
+        t2 = t2 * t2
+        n2 = t2 * t2 * simplex_dot2(SIMPLEX_GRAD2[gi2 + 1], x2, y2)
+    end
+
+    return 70 * (n0 + n1 + n2)
+end
+
+local function load_mat_pick_opts(id, spec)
+    local proximity = spec.proximity
+
+    if type(proximity) ~= "number" or proximity <= 0 then
+        mat_pick_opts[id] = nil
+        return
+    end
+
+    local seed = mat_seed(id)
+
+    mat_pick_opts[id] = {
+        proximity = proximity,
+        perm = build_simplex_perm(seed),
+        seed_x = (seed % 997) * 0.013,
+        seed_y = (math.floor(seed / 997) % 997) * 0.013,
+        seed_z = (math.floor(seed / 994009) % 997) * 0.013,
+    }
+end
+
+local function variant_roll(tile_x, tile_y, tile_z, total, opts)
+    tile_z = tile_z or 0
+
+    if total <= 0 then
+        return 0
+    end
+
+    if not opts or not opts.perm then
+        return variant_hash(tile_x, tile_y + tile_z * 48271) % total
+    end
+
+    local scale = opts.proximity or 1
+    local v = simplex2(
+        tile_x / scale + opts.seed_x,
+        tile_y / scale + opts.seed_y,
+        opts.perm
+    )
+
+    if tile_z ~= 0 then
+        v = v * 0.5 + simplex2(
+            tile_x / scale + opts.seed_x + 31.7,
+            tile_z / scale + opts.seed_z,
+            opts.perm
+        ) * 0.5
+    end
+
+    v = v * 0.5 + 0.5
+
+    if v < 0 then
+        v = 0
+    elseif v >= 1 then
+        v = 1 - 1e-9
+    end
+
+    return math.floor(v * total)
+end
+
+local function pick_from_pool(pool, tile_x, tile_y, tile_z, opts)
+    local roll = variant_roll(tile_x, tile_y, tile_z, pool.total, opts)
+
+    for i = 1, #pool.images do
+        roll = roll - pool.weights[i]
+
+        if roll < 0 then
+            return pool.images[i]
+        end
+    end
+
+    return pool.images[#pool.images]
+end
+
+local function is_image(entry)
+    return type(entry) == "userdata"
+end
+
+local function load_pool_item(item)
+    if type(item) == "string" then
+        return load_block_sprite(item), 1
+    end
+
+    if type(item) == "table" and item.path then
+        local weight = item.weight
+
+        if weight == nil then
+            weight = 1
+        end
+
+        return load_block_sprite(item.path), weight
+    end
+
+    return nil, 0
+end
+
 local function load_variant_entry(entry)
     if type(entry) == "string" then
         return load_block_sprite(entry)
@@ -193,10 +396,34 @@ local function load_variant_entry(entry)
         return nil
     end
 
-    local images = {}
+    if entry.path then
+        local image = load_pool_item(entry)
 
-    for i, path in ipairs(entry) do
-        images[i] = load_block_sprite(path)
+        return image
+    end
+
+    local images = {}
+    local weights = {}
+    local total = 0
+    local weighted = false
+
+    for i = 1, #entry do
+        local item = entry[i]
+        local image, weight = load_pool_item(item)
+
+        if image then
+            if type(item) == "table" and item.path then
+                weighted = true
+            end
+
+            if weight ~= 1 then
+                weighted = true
+            end
+
+            images[#images + 1] = image
+            weights[#weights + 1] = weight
+            total = total + weight
+        end
     end
 
     if #images == 0 then
@@ -207,25 +434,49 @@ local function load_variant_entry(entry)
         return images[1]
     end
 
-    return images
+    if not weighted then
+        return images
+    end
+
+    return {
+        images = images,
+        weights = weights,
+        total = total,
+    }
 end
 
-local function pick_variant_image(entry, tile_x, tile_y)
+local function pick_variant_image(entry, tile_x, tile_y, tile_z, opts)
     if not entry then
         return nil
     end
 
-    if entry[1] then
+    if is_image(entry) then
+        return entry
+    end
+
+    if entry.images and entry.total then
+        return pick_from_pool(entry, tile_x, tile_y, tile_z, opts)
+    end
+
+    if entry[1] and is_image(entry[1]) then
         local n = #entry
 
         if n == 0 then
             return nil
         end
 
-        return entry[(tile_x + tile_y) % n + 1]
+        if opts and opts.perm then
+            return entry[variant_roll(tile_x, tile_y, tile_z, n, opts) + 1]
+        end
+
+        return entry[(tile_x + tile_y + (tile_z or 0)) % n + 1]
     end
 
     return entry
+end
+
+local function mat_image_at(id, tile_x, tile_y, tile_z)
+    return pick_variant_image(mat_images[id], tile_x, tile_y, tile_z, mat_pick_opts[id])
 end
 
 local function grid_frames(grid, cols, row)
@@ -300,6 +551,8 @@ function Terrain.load()
     sync_tile_size()
 
     for id, spec in pairs(Setup.get().terrain_mats) do
+        load_mat_pick_opts(id, spec)
+
         if spec.w and spec.h and not mat_sheets[id] then
             load_mat_sheet(id, spec)
         elseif spec.autotile and not mat_variants[id] then
@@ -316,7 +569,7 @@ function Terrain.load()
                 mat_variants[id]._default = load_variant_entry(spec.path)
             end
         elseif spec.path and not mat_images[id] and not mat_anims[id] then
-            mat_images[id] = load_block_sprite(spec.path)
+            mat_images[id] = load_variant_entry(spec.path)
         end
     end
 end
@@ -574,6 +827,20 @@ local function piece_adjacent_to_transparent_mat(map, piece)
     return false
 end
 
+local function piece_adjacent_to_open_edge(map, piece)
+    local tx = piece.tile_x
+    local ty = piece.tile_y
+    local z = piece.tile_z or 0
+
+    for _, off in ipairs(TRANSPARENT_NEIGHBOR_OFFS) do
+        if mat_at_z(map, tx + off[1], ty + off[2], z) == nil then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function neighbor_same_mat_at_z(map, tile_x, tile_y, z, mat)
     local source = map.source
     local c = Setup.get()
@@ -622,7 +889,9 @@ local function mat_sprite(map, tile_x, tile_y, tile_z, top_z, mat)
             local image = pick_variant_image(
                 variants[name] or variants._default,
                 tile_x,
-                tile_y
+                tile_y,
+                tile_z,
+                mat_pick_opts[mat]
             )
 
             if image then
@@ -637,7 +906,7 @@ local function mat_sprite(map, tile_x, tile_y, tile_z, top_z, mat)
         return sheet.image, sheet.w, sheet.h, mat_anims[mat]
     end
 
-    local image = mat_images[id]
+    local image = mat_image_at(id, tile_x, tile_y, tile_z)
 
     if image then
         return image, image:getWidth(), image:getHeight(), nil
@@ -652,9 +921,9 @@ local function mat_sprite(map, tile_x, tile_y, tile_z, top_z, mat)
     local fill_id = c.terrain_stack_fill
 
     if id ~= top_id then
-        image = mat_images[top_id]
+        image = mat_image_at(top_id, tile_x, tile_y, tile_z)
     else
-        image = mat_images[fill_id]
+        image = mat_image_at(fill_id, tile_x, tile_y, tile_z)
     end
 
     if image then
@@ -844,6 +1113,7 @@ local function apply_bake_flags_in_layer(map, cx, cy, tile_z)
         piece.baked = piece_bakeable(piece)
             and not piece_is_stack_top(map, piece)
             and not piece_adjacent_to_transparent_mat(map, piece)
+            and not piece_adjacent_to_open_edge(map, piece)
     end
 end
 

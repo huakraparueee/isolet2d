@@ -1022,4 +1022,51 @@ function Npc.draw(piece, lg, layout, alpha, z_at)
     return true
 end
 
+function Npc.compact_removed(map)
+    local kept = {}
+
+    for _, piece in ipairs(map.pieces or {}) do
+        if not piece._removed then
+            kept[#kept + 1] = piece
+        end
+    end
+
+    map.pieces = kept
+    map.sync_npc_pieces()
+end
+
+function Npc.remove(map, id_filter, opts)
+    opts = opts or {}
+
+    if not map.pieces then
+        return
+    end
+
+    local duration = opts.duration
+    local faded = false
+
+    for _, piece in ipairs(map.pieces) do
+        if piece.npc and want_id(piece.npc_id, id_filter) then
+            Npc.clear_piece_walk(piece)
+
+            if duration and duration > 0 then
+                map.pieces_removals = map.pieces_removals or {}
+                map.pieces_removals[#map.pieces_removals + 1] = {
+                    npc_id = piece.npc_id,
+                    piece = piece,
+                    elapsed = 0,
+                    duration = duration,
+                }
+                faded = true
+            else
+                piece._removed = true
+            end
+        end
+    end
+
+    if not faded then
+        Npc.compact_removed(map)
+    end
+end
+
 return Npc

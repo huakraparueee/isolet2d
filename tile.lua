@@ -29,6 +29,7 @@ end
     tiles_w, tiles_d
     grid_origin_x, grid_origin_y
     tile_size, iso_x_ratio, iso_y_ratio, iso_eh_ratio
+    map_offset_y (optional, default 0) — shift map anchor down on screen
     scale (optional, default 1)
 ]]
 function Tile.layout(opts)
@@ -46,10 +47,12 @@ function Tile.layout(opts)
     local iso_eh_ratio = opts.iso_eh_ratio or 0.5
     local iso_x = tile_size * iso_x_ratio * scale
     local iso_y = tile_size * iso_y_ratio * scale
+    local map_offset_y = opts.map_offset_y or 0
 
     return {
         cx = Tile.snap_px(opts.design_width * 0.5),
-        cy = Tile.snap_px(opts.design_height * 0.5),
+        cy = Tile.snap_px(opts.design_height * 0.5 + map_offset_y),
+        map_offset_y = map_offset_y,
         grid_x = opts.grid_origin_x + (w - 1) * 0.5,
         grid_y = opts.grid_origin_y + (d - 1) * 0.5,
         tiles_w = w,
