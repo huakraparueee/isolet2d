@@ -53,11 +53,11 @@ Draw the active map in **design space**. Applies `Iso.camera` translate internal
 
 Clears to `src.background` when set. Culls to the current camera viewport (`design_width` × `design_height` from config, offset by `Camera.pan_x` / `pan_y`).
 
-Your game should set up window → design scaling **before** calling this (letterbox, canvas, etc.). See [Optional viewport helper](#optional-viewport-helper-viewlua).
+Your game should set up window → design scaling **before** calling this (letterbox, canvas, etc.).
 
 ### `Iso.tick(dt)`
 
-Updates terrain animation jobs, event removals/updates, structure mode animations, and NPC movement. Flushes deferred NPC/structure ops after events.
+Runs terrain animation jobs and removals, updates in-flight projectiles, flushes deferred NPC/structure/projectile ops, then updates structure mode animations and NPC movement.
 
 ### `Iso.update(dt)`
 
@@ -75,7 +75,7 @@ Pass an **array without** `type` on the outer table to run a sequence in one cal
 
 ### `Iso.is_blocked()` → `boolean`
 
-`true` when `is_busy()` or any NPC is walking / playing a one-shot mode.
+`true` when `is_busy()`, any NPC is walking / playing a one-shot mode, or any projectile is in flight (including delayed spawns).
 
 Use before accepting player input during scripted sequences.
 
@@ -132,6 +132,7 @@ Submodule for panning in design space (see [Camera](#camera-module)).
 | `design_height`       | number   | Design resolution height                        |
 | `grid_origin_x`       | number   | World tile X of stack column 0                  |
 | `grid_origin_y`       | number   | World tile Y of stack row 0                     |
+| `map_offset_y`        | number?  | Shift map anchor down on screen (default `0`)   |
 | `tile_size`           | number   | Base tile size in pixels                        |
 | `iso_x_ratio`         | number   | Half-width factor (default-style: `0.5`)        |
 | `iso_y_ratio`         | number   | Depth factor (e.g. `0.25`)                      |
@@ -139,6 +140,7 @@ Submodule for panning in design space (see [Camera](#camera-module)).
 | `terrain_mats`        | table    | Material id → spec (see below)                  |
 | `structures`          | table    | Structure kind → spec                           |
 | `npcs`                | table    | NPC kind → spec                                 |
+| `projectiles`         | table?   | Projectile kind → spec (see below)              |
 | `terrain_stack_top`   | string?  | Material id for top stack layer sprite fallback |
 | `terrain_stack_fill`  | string?  | Material id for lower stack layers fallback     |
 | `grid_point_per_tile` | number?  | Sub-tile walk grid density (default `2`)        |
@@ -206,6 +208,22 @@ walk = {
 
 NPC `facing` on spawn: `"left"`, `"right"`, or any 8-dir name. Walking updates facing from path segments (8-dir when the active mode has `dirs`).
 
+### `projectiles[kind]`
+
+| Field            | Description                                                    |
+| ---------------- | -------------------------------------------------------------- |
+| `path`           | Optional sprite path (falls back to a colored circle)          |
+| `w`, `h`         | Frame size when using a sprite                                 |
+| `move`           | `"arc"` (default) or `"line"`                                  |
+| `duration`       | Flight time in seconds (default `0.45`)                        |
+| `arc_height`     | Screen-space arc peak for `move = "arc"` (default `40`)        |
+| `radius`         | Draw radius when no sprite (default `5`)                       |
+| `color`          | `{ r, g, b }` for procedural draw (default `{ 1, 0.85, 0.3 }`) |
+| `draw_offset_x`  | Screen offset from trajectory anchor                           |
+| `draw_offset_y`  | Screen offset from trajectory anchor                           |
+
+Default kind when omitted on spawn events: `"bolt"`.
+
 ---
 
 ## Map source (`load_map` / `create_map`)
@@ -216,6 +234,7 @@ NPC `facing` on spawn: `"left"`, `"right"`, or any 8-dir name. Walking updates f
 | `stack_chars`        | Maps stack character → material id in `terrain_mats`                      |
 | `tiles_w`, `tiles_d` | Optional; inferred from `stacks` if omitted                               |
 | `background`         | Optional `{ R, G, B }` used as clear color in `draw_map`                  |
+| `map_offset_y`       | Optional per-map vertical screen offset (overrides init `map_offset_y`)   |
 
 `Stack.height(src, row, col)` (internal) counts non-empty layers in a cell.
 
@@ -326,6 +345,48 @@ Fails silently if out of bounds, unknown kind, id exists, or footprint blocked.
 
 Pathfinding uses `map.placement` nodes and height rules via `map.grid`.
 
+#### `npc.remove`
+
+| Field              | Required | Description                          |
+| ------------------ | -------- | ------------------------------------ |
+| `id` or `npc_id`   | yes      | NPC to remove                        |
+| `duration`         | no       | Fade out time; omit or `0` = instant |
+
+#### `npc.shoot`
+
+Fires a projectile from an NPC, optionally playing a `shoot` or `action` mode first.
+
+| Field                                      | Required | Description                                           |
+| ------------------------------------------ | -------- | ----------------------------------------------------- |
+| `id` or `npc_id`                           | yes      | Shooter NPC                                           |
+| `tile_x`, `tile_y` **or** `to` / `to_px`   | yes      | Target (same shapes as `projectile.spawn` `to`)       |
+| `kind` or `projectile`                     | no       | Projectile kind (default `"bolt"`)                    |
+| `mode`                                     | no       | NPC mode to play; defaults to `shoot` or `action`     |
+| `loop`, `count`, `after_mode`              | no       | Playback for the shoot mode                           |
+| `delay`                                    | no       | Seconds before spawning the projectile                |
+| `on_hit`                                   | no       | Event or event list run when the projectile lands     |
+| `move`, `duration`, `arc_height`           | no       | Override projectile motion                            |
+| `projectile_id`                            | no       | Custom id for the spawned projectile                  |
+
+#### `projectile.spawn`
+
+| Field                                      | Required | Description                                           |
+| ------------------------------------------ | -------- | ----------------------------------------------------- |
+| `kind` or `projectile`                     | no       | Kind from `projectiles` config (default `"bolt"`)     |
+| `from`                                     | no*      | `{ npc_id }`, `{ px, py, z? }`, or `{ tile_x, tile_y }` |
+| `to`                                       | no*      | `{ px, py, z? }` or `{ tile_x, tile_y, tiles_w?, tiles_d? }` |
+| `npc_id` or `id`                           | no       | Shorthand origin from this NPC (`id` alone implies NPC origin) |
+| `from_px`, `from_py`, `from_z`             | no       | Shorthand world origin (use with `from` table, not with `id`) |
+| `tile_x`, `tile_y`                         | no       | Shorthand tile target (center of footprint)           |
+| `to_px`, `to_py`, `to_z`                   | no       | Shorthand world target                                |
+| `move`, `duration`, `arc_height`           | no       | Motion overrides                                      |
+| `draw_offset_x`, `draw_offset_y`           | no       | Draw offset overrides                                 |
+| `on_hit`                                   | no       | Event or event list dispatched on impact              |
+
+\* Provide origin via `from`, `npc_id`/`id`, or `from_px`/`from_py`. Provide target via `to`, `tile_x`/`tile_y`, or `to_px`/`to_py`. Projectile instance ids are auto-generated (`proj_1`, …) unless set via `npc.shoot`'s `projectile_id`.
+
+`on_hit` runs through the same event dispatcher as `Iso.run` (terrain changes, secondary spawns, etc.).
+
 ### Examples
 
 ```lua
@@ -338,6 +399,16 @@ Iso.run_many({
 
 -- Walk to sub-tile position
 Iso.run({ type = "npc.walk_to", id = "hero", pos_x = 2.25, pos_y = 1.75 })
+
+-- Shoot with on_hit terrain update
+Iso.run({
+    type = "npc.shoot",
+    id = "hero",
+    tile_x = 4,
+    tile_y = 2,
+    kind = "bolt",
+    on_hit = { type = "terrain.update", tile_x = 4, tile_y = 2, mat = "dirt" },
+})
 
 -- Sequence in one call (array without .type)
 Iso.run({
@@ -395,6 +466,7 @@ Returned table (selected fields):
 | `structure_pieces`, `npc_pieces`       | Cached lists for drawing                     |
 | `layout`                               | Ground layout from `layout_for`              |
 | `placement`                            | Walk-node graph (`nodes`, `by_cell`)         |
+| `projectiles`                          | Live projectile instances (transient)        |
 | `grid`                                 | See below                                    |
 | `height_at_cache`, `walkable_at_cache` | Per-tile caches                              |
 | `terrain_bake_max_z`                   | Highest baked terrain Z (internal draw hint) |
@@ -423,24 +495,20 @@ Returned table (selected fields):
 
 ## Module files (internal)
 
-| File            | Role                           |
-| --------------- | ------------------------------ |
-| `isolet2d.lua`  | Public facade                  |
-| `setup.lua`     | Config get/set                 |
-| `stack.lua`     | Stack grid parsing             |
-| `tile.lua`      | Tile ↔ screen projection       |
-| `ground.lua`    | Isometric math, placement grid |
-| `terrain.lua`   | Terrain draw, baking, autotile |
-| `structure.lua` | Structure sprites and modes    |
-| `npc.lua`       | NPC animation and walking      |
-| `placement.lua` | Walk-node graph                |
-| `walk.lua`      | Pathfinding on placement graph |
-| `events.lua`    | Event dispatch                 |
-| `occupancy.lua` | Tile occupancy                 |
-| `footprint.lua` | Screen anchors                 |
-| `pieces.lua`    | Piece queries                  |
-| `lookup.lua`    | Config lookups                 |
-| `camera.lua`    | Pan                            |
-| `anim8.lua`     | Vendored anim8 v2.3.1          |
+| File             | Role                                              |
+| ---------------- | ------------------------------------------------- |
+| `isolet2d.lua`   | Public facade                                     |
+| `setup.lua`      | Config get/set                                    |
+| `stack.lua`      | Stack grid parsing                                |
+| `tile.lua`       | Tile ↔ screen projection, layout, viewport cull   |
+| `terrain.lua`    | Terrain draw, baking, autotile                    |
+| `structure.lua`  | Structure sprites, modes, footprint occupancy     |
+| `npc.lua`        | NPC animation, walking, queries                   |
+| `placement.lua`  | Walk-node graph build/rebuild                       |
+| `path.lua`       | Pathfinding and step helpers on placement graph   |
+| `projectile.lua` | Projectile spawn, motion, draw, `on_hit` dispatch |
+| `events.lua`     | Event dispatch                                    |
+| `camera.lua`     | Pan                                               |
+| `anim8.lua`      | Vendored anim8 v2.3.1                             |
 
 Prefer the facade API; require submodules only for advanced integration.
