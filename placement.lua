@@ -4,25 +4,48 @@
 ]]
 
 local Setup = require("setup")
-local Ground = require("ground")
 local Tile = require("tile")
-local Occupancy = require("occupancy")
+local Structure = require("structure")
 
 local Placement = {}
+
+local GRID_POINT_PER_TILE = 2
+local POS_STEP = 1 / GRID_POINT_PER_TILE
+
+function Placement.set_grid_point_per_tile(n)
+    if type(n) ~= "number" or n < 1 or n ~= math.floor(n) then
+        error("placement: grid_point_per_tile must be a positive integer")
+    end
+
+    GRID_POINT_PER_TILE = n
+    POS_STEP = 1 / GRID_POINT_PER_TILE
+end
+
+function Placement.grid_point_per_tile()
+    return GRID_POINT_PER_TILE
+end
+
+function Placement.pos_step()
+    return POS_STEP
+end
+
+local function placement_pos(ix, iy)
+    return (ix + 0.5) * POS_STEP, (iy + 0.5) * POS_STEP
+end
 
 local function key(ix, iy)
     return ix .. "," .. iy
 end
 
 function Placement.cell_ix(px, py)
-    local gpp = Ground.grid_point_per_tile()
+    local gpp = Placement.grid_point_per_tile()
 
     return math.floor(px * gpp + 0.0001),
         math.floor(py * gpp + 0.0001)
 end
 
 local function node_world_pos(ix, iy)
-    return Ground.placement_pos(ix, iy)
+    return placement_pos(ix, iy)
 end
 
 local function tile_allows_node(map, tile_x, tile_y)
@@ -44,7 +67,7 @@ local function tile_allows_node(map, tile_x, tile_y)
         return false
     end
 
-    if Occupancy.blocks_tile(map, tile_x, tile_y) then
+    if Structure.blocks_tile(map, tile_x, tile_y) then
         return false
     end
 
@@ -52,7 +75,7 @@ local function tile_allows_node(map, tile_x, tile_y)
 end
 
 local function remove_tile_nodes(placement, tile_x, tile_y)
-    local gpp = Ground.grid_point_per_tile()
+    local gpp = Placement.grid_point_per_tile()
     local ix0 = tile_x * gpp
     local iy0 = tile_y * gpp
     local removed = {}
@@ -84,8 +107,8 @@ local function remove_tile_nodes(placement, tile_x, tile_y)
 end
 
 local function add_tile_nodes(map, placement, tile_x, tile_y)
-    local gpp = Ground.grid_point_per_tile()
-    local step = Ground.pos_step()
+    local gpp = Placement.grid_point_per_tile()
+    local step = Placement.pos_step()
     local ix0 = tile_x * gpp
     local iy0 = tile_y * gpp
     local layout = map.layout
@@ -194,7 +217,7 @@ function Placement.node_for_footprint(map, tile_x, tile_y, w, d)
     w = w or 1
     d = d or 1
 
-    local gpp = Ground.grid_point_per_tile()
+    local gpp = Placement.grid_point_per_tile()
     local best
     local best_dist = math.huge
     local cx = tile_x + w * 0.5
@@ -261,18 +284,6 @@ function Placement.neighbor(map, px, py, cell_dx, cell_dy)
     local from_ix, from_iy = Placement.cell_ix(px, py)
 
     return Placement.cell_node(map, from_ix + cell_dx, from_iy + cell_dy)
-end
-
-function Placement.pos_to_screen(layout, px, py, z)
-    return Tile.placement_to_screen(layout, px, py, z)
-end
-
-function Placement.node_to_screen(node)
-    if not node then
-        return nil, nil
-    end
-
-    return node.sx, node.sy
 end
 
 return Placement

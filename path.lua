@@ -1,11 +1,10 @@
 --[[
-  Walk on map.placement graph only. Terrain rules live in placement rebuild; edges use node tile coords.
+  Pathfinding on map.placement graph. Terrain rules live in placement rebuild; edges use node tile coords.
 ]]
 
-local Ground = require("ground")
 local Placement = require("placement")
 
-local Walk = {}
+local Path = {}
 
 local NEIGHBORS = {
     { 1, 0 },
@@ -24,30 +23,26 @@ end
 
 local function grid(map)
     if not map or not map.grid then
-        error("walk: map.grid is missing (call Iso.bind_grid)")
+        error("path: map.grid is missing (call Iso.bind_grid)")
     end
 
     return map.grid
 end
 
-function Walk.height(map, tile_x, tile_y)
-    return grid(map).height_at(tile_x, tile_y)
-end
-
-function Walk.surface_z(map, tile_x, tile_y)
+function Path.surface_z(map, tile_x, tile_y)
     return grid(map).surface_z(tile_x, tile_y)
 end
 
-function Walk.surface_z_at_pos(map, px, py, tiles_w, tiles_d)
+function Path.surface_z_at_pos(map, px, py, tiles_w, tiles_d)
     tiles_w = tiles_w or 1
     tiles_d = tiles_d or 1
     local tx = math.floor(px - tiles_w * 0.5 + 0.0001)
     local ty = math.floor(py - tiles_d * 0.5 + 0.0001)
 
-    return Walk.surface_z(map, tx, ty)
+    return Path.surface_z(map, tx, ty)
 end
 
-function Walk.can_step(map, from_x, from_y, to_x, to_y)
+function Path.can_step(map, from_x, from_y, to_x, to_y)
     local g = grid(map)
     local h_from = g.height_at(from_x, from_y)
     local h_to = g.height_at(to_x, to_y)
@@ -78,14 +73,14 @@ local function node_pair(map, from_ix, from_iy, to_ix, to_iy)
         Placement.cell_node(map, to_ix, to_iy)
 end
 
-function Walk.can_edge(map, from_ix, from_iy, to_ix, to_iy, allow_corner_cut)
+function Path.can_edge(map, from_ix, from_iy, to_ix, to_iy, allow_corner_cut)
     local from_node, to_node = node_pair(map, from_ix, from_iy, to_ix, to_iy)
 
     if not from_node or not to_node then
         return false
     end
 
-    if not Walk.can_step(
+    if not Path.can_step(
         map,
         from_node.tile_x,
         from_node.tile_y,
@@ -100,8 +95,8 @@ function Walk.can_edge(map, from_ix, from_iy, to_ix, to_iy, allow_corner_cut)
         local dy = to_iy - from_iy
 
         if dx ~= 0 and dy ~= 0 then
-            if not Walk.can_edge(map, from_ix, from_iy, from_ix + dx, from_iy, true)
-                or not Walk.can_edge(map, from_ix, from_iy, from_ix, from_iy + dy, true)
+            if not Path.can_edge(map, from_ix, from_iy, from_ix + dx, from_iy, true)
+                or not Path.can_edge(map, from_ix, from_iy, from_ix, from_iy + dy, true)
             then
                 return false
             end
@@ -113,13 +108,13 @@ end
 
 local function cell_in_bounds(map, ix, iy)
     local g = grid(map)
-    local step = Ground.pos_step()
+    local step = Placement.pos_step()
     local tx, ty = math.floor(ix * step), math.floor(iy * step)
 
     return g.in_bounds(tx, ty)
 end
 
-function Walk.can_step_pos(map, from_px, from_py, to_px, to_py)
+function Path.can_step_pos(map, from_px, from_py, to_px, to_py)
     if from_px == to_px and from_py == to_py then
         return false
     end
@@ -127,22 +122,22 @@ function Walk.can_step_pos(map, from_px, from_py, to_px, to_py)
     local from_ix, from_iy = Placement.cell_ix(from_px, from_py)
     local to_ix, to_iy = Placement.cell_ix(to_px, to_py)
 
-    return Walk.can_edge(map, from_ix, from_iy, to_ix, to_iy, false)
+    return Path.can_edge(map, from_ix, from_iy, to_ix, to_iy, false)
 end
 
-function Walk.try_step_neighbor(map, from_px, from_py, cell_dx, cell_dy)
+function Path.try_step_neighbor(map, from_px, from_py, cell_dx, cell_dy)
     local from_ix, from_iy = Placement.cell_ix(from_px, from_py)
     local to_ix = from_ix + cell_dx
     local to_iy = from_iy + cell_dy
 
-    if not Walk.can_edge(map, from_ix, from_iy, to_ix, to_iy, false) then
+    if not Path.can_edge(map, from_ix, from_iy, to_ix, to_iy, false) then
         return nil
     end
 
     return Placement.cell_node(map, to_ix, to_iy)
 end
 
-function Walk.pick_reachable_near(map, px, py, radius)
+function Path.pick_reachable_near(map, px, py, radius)
     local from_node = Placement.node_at_pos(map, px, py)
 
     if not from_node or not map.placement then
@@ -176,7 +171,7 @@ function Walk.pick_reachable_near(map, px, py, radius)
 
             if not visited[nk]
                 and cell_in_bounds(map, nx, ny)
-                and Walk.can_edge(map, cx, cy, nx, ny, false)
+                and Path.can_edge(map, cx, cy, nx, ny, false)
             then
                 local next_node = Placement.cell_node(map, nx, ny)
 
@@ -198,7 +193,7 @@ function Walk.pick_reachable_near(map, px, py, radius)
     return candidates[love.math.random(#candidates)]
 end
 
-function Walk.find_path_pos(map, from_px, from_py, to_px, to_py)
+function Path.find_path_pos(map, from_px, from_py, to_px, to_py)
     local from_ix, from_iy = Placement.cell_ix(from_px, from_py)
     local to_ix, to_iy = Placement.cell_ix(to_px, to_py)
 
@@ -256,7 +251,7 @@ function Walk.find_path_pos(map, from_px, from_py, to_px, to_py)
             if cell_in_bounds(map, nx, ny) then
                 local nk = key(nx, ny)
 
-                if not visited[nk] and Walk.can_edge(map, cx, cy, nx, ny, false) then
+                if not visited[nk] and Path.can_edge(map, cx, cy, nx, ny, false) then
                     visited[nk] = true
                     came_from[nk] = { cx, cy }
                     queue[#queue + 1] = { nx, ny }
@@ -268,21 +263,4 @@ function Walk.find_path_pos(map, from_px, from_py, to_px, to_py)
     return nil
 end
 
-function Walk.find_path(map, from_x, from_y, to_x, to_y)
-    local from_node = Placement.node_for_footprint(map, from_x, from_y, 1, 1)
-    local to_node = Placement.node_for_footprint(map, to_x, to_y, 1, 1)
-
-    if not from_node or not to_node then
-        return nil
-    end
-
-    return Walk.find_path_pos(
-        map,
-        from_node.px,
-        from_node.py,
-        to_node.px,
-        to_node.py
-    )
-end
-
-return Walk
+return Path

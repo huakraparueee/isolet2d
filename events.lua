@@ -3,8 +3,6 @@
   Uses map.grid / map.terrain_mat_color bound by bind_grid.
 ]]
 
-local Occupancy = require("occupancy")
-local Pieces = require("pieces")
 local Terrain = require("terrain")
 local Structure = require("structure")
 
@@ -128,16 +126,16 @@ local function structure_add(map, ev)
         error("structure.add requires id")
     end
 
-    if Occupancy.find_by_id(map, structure_id) then
+    if Structure.find_by_id(map, structure_id) then
         return
     end
 
-    for _, cell in ipairs(Occupancy.footprint_cells(map, ev.tile_x, ev.tile_y, kind)) do
+    for _, cell in ipairs(Structure.footprint_cells(map, ev.tile_x, ev.tile_y, kind)) do
         if not grid(map).in_bounds(cell.tile_x, cell.tile_y) then
             return
         end
 
-        if Occupancy.find_at(map, cell.tile_x, cell.tile_y) then
+        if Structure.find_at(map, cell.tile_x, cell.tile_y) then
             return
         end
     end
@@ -154,24 +152,20 @@ local function structure_add(map, ev)
     }
     map.structure_pieces = map.structure_pieces or {}
     map.structure_pieces[#map.structure_pieces + 1] = map.pieces[#map.pieces]
-    Structure.init_piece(map.pieces[#map.pieces], ev)
-
-    if map.rebuild_placement_tile then
-        for _, cell in ipairs(
-            Occupancy.footprint_cells(map, ev.tile_x, ev.tile_y, kind)
-        ) do
-            map.rebuild_placement_tile(cell.tile_x, cell.tile_y)
-        end
-    end
+    queue_op(map, {
+        type = "structure.add",
+        piece = map.pieces[#map.pieces],
+        ev = ev,
+    })
 end
 
 local function structure_remove(map, ev)
     local piece
 
     if ev.id or ev.structure_id then
-        piece = Occupancy.find_by_id(map, ev.id or ev.structure_id)
+        piece = Structure.find_by_id(map, ev.id or ev.structure_id)
     else
-        piece = Occupancy.find_at(map, ev.tile_x, ev.tile_y)
+        piece = Structure.find_at(map, ev.tile_x, ev.tile_y)
     end
 
     if not piece then
@@ -347,7 +341,7 @@ local function terrain_update(map, ev)
         return
     end
 
-    local piece = Pieces.find_terrain_at(
+    local piece = Terrain.find_terrain_at(
         map,
         ev.tile_x,
         ev.tile_y,
@@ -417,7 +411,7 @@ local function terrain_update(map, ev)
 end
 
 local function terrain_remove(map, ev)
-    local piece = Pieces.find_terrain_at(
+    local piece = Terrain.find_terrain_at(
         map,
         ev.tile_x,
         ev.tile_y,
@@ -544,7 +538,7 @@ local function update_terrain_updates(map, dt)
         local piece = job.piece
 
         if not piece or piece._removed then
-            piece = Pieces.find_at(
+            piece = Terrain.find_at(
                 map,
                 job.tile_x,
                 job.tile_y,
@@ -589,9 +583,9 @@ local function update_terrain_removals(map, dt)
         local piece = job.piece
 
         if job.structure_id then
-            piece = Occupancy.find_by_id(map, job.structure_id)
+            piece = Structure.find_by_id(map, job.structure_id)
         elseif not piece or piece._removed then
-            piece = Pieces.find_at(
+            piece = Terrain.find_at(
                 map,
                 job.tile_x,
                 job.tile_y,
@@ -620,14 +614,14 @@ local function update_terrain_removals(map, dt)
 
     for _, piece in ipairs(map.pieces) do
         if piece._removed then
-            if Pieces.is_terrain_block(piece) then
+            if Terrain.is_terrain_block(piece) then
                 removed_tiles[#removed_tiles + 1] = {
                     piece.tile_x,
                     piece.tile_y,
                 }
             elseif Structure.is_piece(piece) then
                 for _, cell in ipairs(
-                    Occupancy.footprint_cells(
+                    Structure.footprint_cells(
                         map,
                         piece.tile_x,
                         piece.tile_y,

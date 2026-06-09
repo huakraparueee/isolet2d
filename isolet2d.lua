@@ -3,20 +3,15 @@
 ]]
 
 local Stack = require("stack")
-local Ground = require("ground")
 local Tile = require("tile")
 local Events = require("events")
 local Setup = require("setup")
-local Lookup = require("lookup")
-local Pieces = require("pieces")
 local Terrain = require("terrain")
 local Npc = require("npc")
-local Walk = require("walk")
+local Path = require("path")
 local Placement = require("placement")
 local Structure = require("structure")
-local Occupancy = require("occupancy")
 local Camera = require("camera")
-local Footprint = require("footprint")
 
 local M = {
     camera = Camera,
@@ -43,7 +38,7 @@ function M.init(raw)
     Structure.load()
 
     if raw.grid_point_per_tile then
-        Ground.set_grid_point_per_tile(raw.grid_point_per_tile)
+        Placement.set_grid_point_per_tile(raw.grid_point_per_tile)
     end
 end
 
@@ -97,7 +92,7 @@ local function build_height_cache(map, src)
 end
 
 local function surface_mat(map, src, tile_x, tile_y)
-    local piece = Pieces.find_terrain_at(map, tile_x, tile_y)
+    local piece = Terrain.find_terrain_at(map, tile_x, tile_y)
 
     if piece and piece.mat then
         return piece.mat
@@ -127,10 +122,7 @@ local function tile_walkable(map, src, tile_x, tile_y)
         return false
     end
 
-    return Lookup.terrain_mat_walkable(
-        cfg().terrain_mats,
-        surface_mat(map, src, tile_x, tile_y)
-    )
+    return Terrain.mat_walkable(surface_mat(map, src, tile_x, tile_y))
 end
 
 local function build_walkable_cache(map, src)
@@ -151,7 +143,7 @@ local function build_walkable_cache(map, src)
                 cache_row[col - 1] = false
             else
                 local mat = Stack.layer_mat(src, row, col, h - 1, terrain_mats)
-                cache_row[col - 1] = Lookup.terrain_mat_walkable(terrain_mats, mat)
+                cache_row[col - 1] = Terrain.mat_walkable(mat)
             end
         end
     end
@@ -174,7 +166,7 @@ local function refresh_height_at(map, src, tile_x, tile_y)
         return
     end
 
-    local z = Pieces.top_terrain_z(map, tile_x, tile_y)
+    local z = Terrain.top_terrain_z(map, tile_x, tile_y)
 
     if z >= 0 then
         row[tile_x] = z + 1
@@ -243,7 +235,7 @@ function M.bind_grid(map, src)
             return in_bounds_for(src, tile_x, tile_y)
         end,
         structure_span = function(kind)
-            return Lookup.structure_tile_span(c.structures, kind)
+            return Structure.tile_span(kind)
         end,
     }
 
@@ -265,11 +257,11 @@ function M.bind_grid(map, src)
     end
 
     map.terrain_mat_color = function(mat)
-        return Lookup.terrain_mat_color(c.terrain_mats, mat)
+        return Terrain.mat_color(mat)
     end
 
     map.terrain_mat_alpha = function(mat)
-        return Lookup.terrain_mat_alpha(c.terrain_mats, mat)
+        return Terrain.mat_alpha(mat)
     end
 
     map.apply_terrain_mat = function(piece, mat)
@@ -285,7 +277,7 @@ function M.bind_grid(map, src)
     end
 
     map.has_structure_kind = function(kind)
-        return Lookup.has_structure_kind(c.structures, kind)
+        return Structure.has_kind(kind)
     end
 end
 
@@ -332,15 +324,15 @@ function M.is_npc_anim_busy(id)
 end
 
 function M.pos_step()
-    return Ground.pos_step()
+    return Placement.pos_step()
 end
 
 function M.pick_placement_near(px, py, radius)
-    return Walk.pick_reachable_near(active_map(), px, py, radius)
+    return Path.pick_reachable_near(active_map(), px, py, radius)
 end
 
 function M.try_step_neighbor(from_px, from_py, cell_dx, cell_dy)
-    return Walk.try_step_neighbor(
+    return Path.try_step_neighbor(
         active_map(),
         from_px,
         from_py,
@@ -354,7 +346,7 @@ function M.on_walkable_cell(piece)
 end
 
 function M.can_step_pos(from_px, from_py, to_px, to_py)
-    return Walk.can_step_pos(
+    return Path.can_step_pos(
         active_map(),
         from_px,
         from_py,
@@ -376,40 +368,6 @@ local function default_viewport()
         w = c.design_width,
         h = c.design_height,
     }
-end
-
-local function grid_index(source, tile_x, tile_y)
-    local c = Setup.get()
-    local lx = tile_x - c.grid_origin_x
-    local ly = tile_y - c.grid_origin_y
-
-    if lx < 0 or lx >= source.tiles_w or ly < 0 or ly >= source.tiles_d then
-        return nil, nil
-    end
-
-    return lx, ly
-end
-
-local function top_z_from_cache(source, cache, tile_x, tile_y)
-    local lx, ly = grid_index(source, math.floor(tile_x), math.floor(tile_y))
-
-    if not lx then
-        return 0
-    end
-
-    local z = cache.tops[ly]
-
-    if not z then
-        return 0
-    end
-
-    z = z[lx]
-
-    if not z or z < 0 then
-        return 0
-    end
-
-    return z
 end
 
 local function sum_bucket_insert(buckets, min_sum, max_sum, entry)
@@ -488,7 +446,7 @@ local function draw_layer_entry(lg, layout, source, cache, map, entry)
             tz,
             piece.color,
             piece.alpha or 1,
-            top_z_from_cache(source, cache, tx, ty),
+            Tile.top_z_from_cache(source, cache, tx, ty),
             piece.mat
         )
         return
@@ -496,14 +454,14 @@ local function draw_layer_entry(lg, layout, source, cache, map, entry)
 
     if entry.type == "npc" then
         Npc.draw(entry.piece, lg, layout, entry.piece.alpha, function(tx, ty)
-            return top_z_from_cache(source, cache, tx, ty)
+            return Tile.top_z_from_cache(source, cache, tx, ty)
         end)
         return
     end
 
     if entry.type == "structure" then
         Structure.draw(entry.piece, lg, layout, entry.piece.alpha, function(tx, ty)
-            return top_z_from_cache(source, cache, tx, ty)
+            return Tile.top_z_from_cache(source, cache, tx, ty)
         end)
     end
 end
@@ -533,21 +491,18 @@ local function piece_in_view(piece, rect)
     if piece.npc then
         local w = piece.tiles_w or 1
         local d = piece.tiles_d or 1
-        local ox, oy = Footprint.origin(piece, w, d)
+        local ox, oy = Tile.origin(piece, w, d)
 
         return footprint_in_rect(ox, oy, w, d, rect)
     end
 
     if Structure.is_piece(piece) then
-        local w, d = Lookup.structure_tile_span(
-            Setup.get().structures,
-            piece.structure
-        )
+        local w, d = Structure.tile_span(piece.structure)
 
         return footprint_in_rect(piece.tile_x, piece.tile_y, w, d, rect)
     end
 
-    if Pieces.is_terrain_block(piece) then
+    if Terrain.is_terrain_block(piece) then
         return tile_in_rect(piece.tile_x, piece.tile_y, rect)
     end
 
@@ -567,7 +522,7 @@ local function footprint_sort_key(tile_x, tile_y, tiles_w, tiles_d, source, cach
             local ty = oy + ly
             local gx = math.floor(tx + 0.5)
             local gy = math.floor(ty + 0.5)
-            local cell_z = top_z_from_cache(source, cache, gx, gy)
+            local cell_z = Tile.top_z_from_cache(source, cache, gx, gy)
             local sum = gx + gy + cell_z
 
             if sum > max_sum then
@@ -592,7 +547,7 @@ local function npc_tiles_h(piece)
         return 1
     end
 
-    local _, _, h = Lookup.npc_tile_span(Setup.get().npcs, kind)
+    local _, _, h = Npc.tile_span(kind)
 
     return h
 end
@@ -602,21 +557,15 @@ local function structure_tiles_h(piece)
         return piece.tiles_h
     end
 
-    local _, _, h = Lookup.structure_tile_span(
-        Setup.get().structures,
-        piece.structure
-    )
+    local _, _, h = Structure.tile_span(piece.structure)
 
     return h
 end
 
 local function piece_sort_key(piece, source, cache)
     if piece.npc then
-        local w, d = Lookup.npc_tile_span(
-            Setup.get().npcs,
-            piece.npc.kind
-        )
-        local ox, oy = Footprint.origin(piece, w, d)
+        local w, d = Npc.tile_span(piece.npc.kind)
+        local ox, oy = Tile.origin(piece, w, d)
         local sum, ax, ay = footprint_sort_key(ox, oy, w, d, source, cache)
         local h = npc_tiles_h(piece)
 
@@ -624,10 +573,7 @@ local function piece_sort_key(piece, source, cache)
     end
 
     if Structure.is_piece(piece) then
-        local w, d = Lookup.structure_tile_span(
-            Setup.get().structures,
-            piece.structure
-        )
+        local w, d = Structure.tile_span(piece.structure)
         local sum, ax, ay = footprint_sort_key(
             piece.tile_x,
             piece.tile_y,
@@ -670,57 +616,6 @@ local function tile_rect_for_viewport(layout, viewport, pad)
     }
 end
 
-local function build_render_cache(map, cache_rect)
-    local source = map.source
-    local tops = {}
-    local height_cache = map.height_at_cache
-
-    if not height_cache then
-        return { tops = tops }
-    end
-
-    local min_tx, min_ty, max_tx, max_ty
-
-    if cache_rect then
-        min_tx = cache_rect.min_tx
-        min_ty = cache_rect.min_ty
-        max_tx = cache_rect.max_tx
-        max_ty = cache_rect.max_ty
-    else
-        min_tx = 0
-        min_ty = 0
-        max_tx = source.tiles_w - 1
-        max_ty = source.tiles_d - 1
-    end
-
-    for ty = min_ty, max_ty do
-        local cache_row = height_cache[ty]
-
-        if cache_row then
-            local row
-
-            for tx = min_tx, max_tx do
-                local h = cache_row[tx]
-
-                if h and h > 0 then
-                    local lx, ly = grid_index(source, tx, ty)
-
-                    if lx then
-                        if not row then
-                            row = {}
-                            tops[ly] = row
-                        end
-
-                        row[lx] = h - 1
-                    end
-                end
-            end
-        end
-    end
-
-    return { tops = tops }
-end
-
 local entry_pool = {}
 local entry_pool_i = 1
 
@@ -743,7 +638,7 @@ end
 
 local function is_live_terrain_piece(piece)
     return not piece._removed
-        and Pieces.is_terrain_block(piece)
+        and Terrain.is_terrain_block(piece)
         and not piece.baked
 end
 
@@ -758,14 +653,14 @@ local function terrain_draw_max_z(map, source, cache)
 
     for _, piece in ipairs(map.structure_pieces or {}) do
         local _, tx, ty = piece_sort_key(piece, source, cache)
-        local base_z = top_z_from_cache(source, cache, tx, ty)
+        local base_z = Tile.top_z_from_cache(source, cache, tx, ty)
         max_z = math.max(max_z, base_z + structure_tiles_h(piece) - 1)
     end
 
     for _, piece in ipairs(map.npc_pieces or {}) do
         if piece.npc then
             local _, tx, ty = piece_sort_key(piece, source, cache)
-            local base_z = top_z_from_cache(source, cache, tx, ty)
+            local base_z = Tile.top_z_from_cache(source, cache, tx, ty)
             max_z = math.max(max_z, base_z + npc_tiles_h(piece) - 1)
         end
     end
@@ -819,12 +714,12 @@ local function draw_npc_pos_debug(map, lg, layout, view_rect)
                 and anchor_ty >= view_rect.min_ty
                 and anchor_ty <= view_rect.max_ty
             then
-                local sx, sy = Placement.pos_to_screen(
-                layout,
-                piece.pos_x,
-                piece.pos_y,
-                piece.tile_z
-            )
+                local sx, sy = Tile.placement_to_screen(
+                    layout,
+                    piece.pos_x,
+                    piece.pos_y,
+                    piece.tile_z
+                )
 
                 lg.circle("fill", sx, sy, r)
             end
@@ -846,7 +741,7 @@ function M.draw_map()
     local layout = current_map.layout
     local view_rect = tile_rect_for_viewport(layout, vp, CULL_PAD_TILES)
     local cache_rect = tile_rect_for_viewport(layout, vp, CULL_PAD_TILES + CULL_CACHE_PAD_TILES)
-    local cache = build_render_cache(current_map, cache_rect)
+    local cache = Tile.build_render_cache(current_map, cache_rect)
     local max_z = terrain_draw_max_z(current_map, source, cache)
 
     if source.background then
@@ -887,7 +782,7 @@ function M.draw_map()
         for _, piece in ipairs(current_map.structure_pieces or {}) do
             if piece_in_view(piece, view_rect) then
                 local sum, tx, ty = piece_sort_key(piece, source, cache)
-                local struct_base_z = top_z_from_cache(source, cache, tx, ty)
+                local struct_base_z = Tile.top_z_from_cache(source, cache, tx, ty)
                 local struct_top_z = struct_base_z + structure_tiles_h(piece) - 1
 
                 if struct_top_z == tile_z then
@@ -907,7 +802,7 @@ function M.draw_map()
         for _, piece in ipairs(current_map.npc_pieces or {}) do
             if piece_in_view(piece, view_rect) then
                 local sum, tx, ty = piece_sort_key(piece, source, cache)
-                local npc_base_z = top_z_from_cache(source, cache, tx, ty)
+                local npc_base_z = Tile.top_z_from_cache(source, cache, tx, ty)
                 local npc_top_z = npc_base_z + npc_tiles_h(piece) - 1
 
                 if npc_top_z == tile_z then
@@ -1020,6 +915,23 @@ local function apply_pending_ops(map, ops)
     for _, op in ipairs(ops) do
         if op.type == "npc.add" then
             Npc.add(map, op.piece, op.ev)
+        elseif op.type == "structure.add" then
+            Structure.init_piece(op.piece, op.ev)
+
+            local kind = op.ev.kind or op.ev.structure
+
+            if map.rebuild_placement_tile then
+                for _, cell in ipairs(
+                    Structure.footprint_cells(
+                        map,
+                        op.piece.tile_x,
+                        op.piece.tile_y,
+                        kind
+                    )
+                ) do
+                    map.rebuild_placement_tile(cell.tile_x, cell.tile_y)
+                end
+            end
         elseif op.type == "npc.set_mode" then
             Npc.set_mode(map, op.mode, op.id, op.opts)
         elseif op.type == "structure.set_mode" then

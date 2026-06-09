@@ -4,12 +4,121 @@
 
 local Stack = require("stack")
 local Setup = require("setup")
-local Lookup = require("lookup")
-local IsoGround = require("ground")
-local Pieces = require("pieces")
+local Tile = require("tile")
 local anim8 = require("anim8")
 
 local Terrain = {}
+
+function Terrain.is_terrain_block(piece)
+    return piece.mat ~= nil or piece.color ~= nil
+end
+
+function Terrain.top_terrain_z(map, tile_x, tile_y)
+    local max_z = -1
+
+    for _, piece in ipairs(map.pieces or {}) do
+        if Terrain.is_terrain_block(piece)
+            and piece.tile_x == tile_x
+            and piece.tile_y == tile_y
+        then
+            max_z = math.max(max_z, piece.tile_z or 0)
+        end
+    end
+
+    return max_z
+end
+
+function Terrain.find_at(map, tile_x, tile_y, tile_z)
+    local z = tile_z or 0
+
+    for _, piece in ipairs(map.pieces or {}) do
+        if piece.tile_x == tile_x
+            and piece.tile_y == tile_y
+            and (piece.tile_z or 0) == z
+        then
+            return piece
+        end
+    end
+end
+
+function Terrain.find_terrain_at(map, tile_x, tile_y, tile_z)
+    if tile_z ~= nil then
+        for _, piece in ipairs(map.pieces or {}) do
+            if Terrain.is_terrain_block(piece)
+                and piece.tile_x == tile_x
+                and piece.tile_y == tile_y
+                and (piece.tile_z or 0) == tile_z
+            then
+                return piece
+            end
+        end
+
+        return nil
+    end
+
+    local best_z = -1
+    local best = nil
+
+    for _, piece in ipairs(map.pieces or {}) do
+        if Terrain.is_terrain_block(piece)
+            and piece.tile_x == tile_x
+            and piece.tile_y == tile_y
+        then
+            local z = piece.tile_z or 0
+
+            if z > best_z then
+                best_z = z
+                best = piece
+            end
+        end
+    end
+
+    return best
+end
+
+local function mat_spec(mat)
+    if not mat then
+        return nil
+    end
+
+    return Setup.get().terrain_mats[mat]
+end
+
+function Terrain.mat_color(mat)
+    local spec = mat_spec(mat)
+
+    if spec and spec.color then
+        return spec.color[1], spec.color[2], spec.color[3]
+    end
+end
+
+function Terrain.mat_walkable(mat)
+    if not mat then
+        return true
+    end
+
+    local spec = mat_spec(mat)
+
+    if spec and spec.walkable == false then
+        return false
+    end
+
+    return true
+end
+
+function Terrain.mat_alpha(mat)
+    if not mat then
+        return 1
+    end
+
+    local spec = mat_spec(mat)
+
+    if spec and spec.alpha ~= nil then
+        return spec.alpha
+    end
+
+    return 1
+end
 
 local mat_images = {}
 local mat_anims = {}
@@ -38,7 +147,27 @@ local MASK_TO_VARIANT = {
 }
 
 local T
-local snap_px = IsoGround.snap_px
+local snap_px = Tile.snap_px
+
+local function terrain_sprite_scale(screen_px, block_px)
+    screen_px = screen_px or 1
+    block_px = block_px or 1
+    local target_w = screen_px
+    local s = target_w / block_px
+    local drawn_w = math.floor(block_px * s + 0.5)
+
+    if drawn_w < target_w then
+        s = (target_w + 1) / block_px
+    end
+
+    return s
+end
+
+local function block_sprite_bottom_y(tile_cy, scale, tile_size, iso_y_ratio)
+    local ts = tile_size * scale
+
+    return tile_cy + Tile.hd_for_tile_span(ts, iso_y_ratio)
+end
 
 local function sync_tile_size()
     T = Setup.get().tile_size
@@ -198,101 +327,14 @@ function Terrain.update(dt)
     end
 end
 
-local function grid_index(source, tile_x, tile_y)
-    local c = Setup.get()
-    local lx = tile_x - c.grid_origin_x
-    local ly = tile_y - c.grid_origin_y
-
-    if lx < 0 or lx >= source.tiles_w or ly < 0 or ly >= source.tiles_d then
-        return nil, nil
-    end
-
-    return lx, ly
-end
-
 local CHUNK_TILES = 25
-
--- Once per frame: top_z per cell (from height_at_cache; does not scan pieces)
-local function build_render_cache(map, cache_rect)
-    local source = map.source
-    local tops = {}
-    local height_cache = map.height_at_cache
-
-    if not height_cache then
-        return { tops = tops }
-    end
-
-    local min_tx, min_ty, max_tx, max_ty
-
-    if cache_rect then
-        min_tx = cache_rect.min_tx
-        min_ty = cache_rect.min_ty
-        max_tx = cache_rect.max_tx
-        max_ty = cache_rect.max_ty
-    else
-        min_tx = 0
-        min_ty = 0
-        max_tx = source.tiles_w - 1
-        max_ty = source.tiles_d - 1
-    end
-
-    for ty = min_ty, max_ty do
-        local cache_row = height_cache[ty]
-
-        if cache_row then
-            local row
-
-            for tx = min_tx, max_tx do
-                local h = cache_row[tx]
-
-                if h and h > 0 then
-                    local lx, ly = grid_index(source, tx, ty)
-
-                    if lx then
-                        if not row then
-                            row = {}
-                            tops[ly] = row
-                        end
-
-                        row[lx] = h - 1
-                    end
-                end
-            end
-        end
-    end
-
-    return { tops = tops }
-end
-
-local function top_z_from_cache(source, cache, tile_x, tile_y)
-    local lx, ly = grid_index(source, math.floor(tile_x), math.floor(tile_y))
-
-    if not lx then
-        return 0
-    end
-
-    local z = cache.tops[ly]
-
-    if not z then
-        return 0
-    end
-
-    z = z[lx]
-
-    if not z or z < 0 then
-        return 0
-    end
-
-    return z
-end
 
 local function fill_top_face_at(lg, cx, cy, screen_scale, r, g, b, a, size_mul)
     size_mul = size_mul or 1
     local s = T * (screen_scale or 1) * size_mul
-    local c = Setup.get()
-    local hw = s * c.iso_x_ratio
-    local hd = s * c.iso_y_ratio
-    local eh = s * c.iso_eh_ratio
+    local hw = Tile.hw_for_tile_span(s, Setup.get().iso_x_ratio)
+    local hd = Tile.hd_for_tile_span(s, Setup.get().iso_y_ratio)
+    local eh = Tile.eh_for_tile_span(s, Setup.get().iso_eh_ratio)
     local yt = cy - eh
 
     cx = snap_px(cx)
@@ -312,13 +354,13 @@ local function fill_top_face_at(lg, cx, cy, screen_scale, r, g, b, a, size_mul)
 end
 
 local function fill_top_face(lg, layout, tile_x, tile_y, tile_z, r, g, b, a)
-    local cx, cy = IsoGround.tile_to_screen(layout, tile_x, tile_y, tile_z)
+    local cx, cy = Tile.to_screen(layout, tile_x, tile_y, tile_z)
 
     fill_top_face_at(lg, cx, cy, layout.scale or 1, r, g, b, a, 1)
 end
 
 local function prism_color_for_mat(mat)
-    local r, g, b = Lookup.terrain_mat_color(Setup.get().terrain_mats, mat)
+    local r, g, b = Terrain.mat_color(mat)
 
     if r then
         return { r, g, b }
@@ -513,7 +555,7 @@ local TRANSPARENT_NEIGHBOR_OFFS = {
 }
 
 local function mat_is_transparent(mat)
-    return Lookup.terrain_mat_alpha(Setup.get().terrain_mats, mat) < 1
+    return Terrain.mat_alpha(mat) < 1
 end
 
 local function piece_adjacent_to_transparent_mat(map, piece)
@@ -625,13 +667,13 @@ end
 local function draw_block_sprite(lg, layout, image, src_w, src_h, tile_x, tile_y, tile_z, alpha, anim)
     local scale = layout.scale or 1
     local tile_px = layout.tile_size * scale
-    local cx, cy = IsoGround.tile_to_screen(layout, tile_x, tile_y, tile_z)
+    local cx, cy = Tile.to_screen(layout, tile_x, tile_y, tile_z)
     local a = alpha or 1
     local fw = src_w or image:getWidth()
     local fh = src_h or image:getHeight()
-    local s = IsoGround.terrain_sprite_scale(tile_px, fw)
+    local s = terrain_sprite_scale(tile_px, fw)
     local draw_x = cx
-    local draw_y = IsoGround.block_sprite_bottom_y(
+    local draw_y = block_sprite_bottom_y(
         cy,
         scale,
         layout.tile_size,
@@ -679,14 +721,14 @@ local function is_terrain_animating(map, tile_x, tile_y)
 end
 
 local function piece_bakeable(piece)
-    return Pieces.is_terrain_block(piece)
+    return Terrain.is_terrain_block(piece)
         and piece.map
         and piece.bake ~= false
         and (piece.alpha or 1) >= 1
 end
 
 local function is_baked_terrain(piece)
-    return Pieces.is_terrain_block(piece) and piece.baked == true
+    return Terrain.is_terrain_block(piece) and piece.baked == true
 end
 
 local function tile_chunk_index(tx, ty)
@@ -707,14 +749,14 @@ local function piece_screen_bounds(layout, map, piece, top_z)
     local scale = layout.scale or 1
     local tile_px = layout.tile_size * scale
     local tx, ty, tz = piece.tile_x, piece.tile_y, piece.tile_z or 0
-    local cx, cy = IsoGround.tile_to_screen(layout, tx, ty, tz)
+    local cx, cy = Tile.to_screen(layout, tx, ty, tz)
     local image, src_w, src_h, anim = mat_sprite(map, tx, ty, tz, top_z, piece.mat)
 
     if image then
         local fw = src_w or image:getWidth()
         local fh = src_h or image:getHeight()
-        local s = IsoGround.terrain_sprite_scale(tile_px, fw)
-        local draw_y = IsoGround.block_sprite_bottom_y(
+        local s = terrain_sprite_scale(tile_px, fw)
+        local draw_y = block_sprite_bottom_y(
             cy,
             scale,
             layout.tile_size,
@@ -727,9 +769,9 @@ local function piece_screen_bounds(layout, map, piece, top_z)
     end
 
     local s = T * scale
-    local hw = IsoGround.hw_for_tile_span(s, layout.iso_x_ratio)
-    local hd = IsoGround.hd_for_tile_span(s, layout.iso_y_ratio)
-    local eh = IsoGround.eh_for_tile_span(s, layout.iso_eh_ratio)
+    local hw = Tile.hw_for_tile_span(s, layout.iso_x_ratio)
+    local hd = Tile.hd_for_tile_span(s, layout.iso_y_ratio)
+    local eh = Tile.eh_for_tile_span(s, layout.iso_eh_ratio)
     local yt = cy - eh
 
     return cx - hw, yt - hd, cx + hw, cy + hd
@@ -774,7 +816,7 @@ local function layer_pieces_in_chunk_layer(map, cx, cy, tile_z)
 
     for _, piece in ipairs(map.pieces or {}) do
         if not piece._removed
-            and Pieces.is_terrain_block(piece)
+            and Terrain.is_terrain_block(piece)
             and (piece.tile_z or 0) == tile_z
             and piece.tile_x >= min_tx
             and piece.tile_x <= max_tx
@@ -825,7 +867,7 @@ local function bake_chunk(map, cx, cy, tile_z)
         return nil
     end
 
-    local cache = build_render_cache(map, {
+    local cache = Tile.build_render_cache(map, {
         min_tx = min_tx,
         min_ty = min_ty,
         max_tx = max_tx,
@@ -835,7 +877,7 @@ local function bake_chunk(map, cx, cy, tile_z)
     local world_max_x, world_max_y = -math.huge, -math.huge
 
     for _, piece in ipairs(pieces) do
-        local top_z = top_z_from_cache(source, cache, piece.tile_x, piece.tile_y)
+        local top_z = Tile.top_z_from_cache(source, cache, piece.tile_x, piece.tile_y)
         local x0, y0, x1, y1 = piece_screen_bounds(layout, map, piece, top_z)
 
         world_min_x = math.min(world_min_x, x0)
@@ -889,7 +931,7 @@ local function bake_chunk(map, cx, cy, tile_z)
             tz,
             piece.color,
             1,
-            top_z_from_cache(source, cache, tx, ty),
+            Tile.top_z_from_cache(source, cache, tx, ty),
             piece.mat
         )
     end
@@ -993,7 +1035,7 @@ local function clear_upper_baked_flags(map)
     local floor_max_z = map.min_visible_z or 0
 
     for _, piece in ipairs(map.pieces or {}) do
-        if Pieces.is_terrain_block(piece) and (piece.tile_z or 0) > floor_max_z then
+        if Terrain.is_terrain_block(piece) and (piece.tile_z or 0) > floor_max_z then
             piece.baked = false
         end
     end
@@ -1026,7 +1068,7 @@ function Terrain.build_bake(map)
     local max_z = 0
 
     for _, piece in ipairs(map.pieces or {}) do
-        if Pieces.is_terrain_block(piece) then
+        if Terrain.is_terrain_block(piece) then
             max_z = math.max(max_z, piece.tile_z or 0)
         end
     end
@@ -1206,11 +1248,11 @@ function Terrain.draw_unit_cube(lg, layout, _cache, map, tile_x, tile_y, tile_z,
     end
 
     local scale = layout.scale or 1
-    local cx, cy = IsoGround.tile_to_screen(layout, tile_x, tile_y, tile_z)
+    local cx, cy = Tile.to_screen(layout, tile_x, tile_y, tile_z)
     local s = T * scale
-    local hw = IsoGround.hw_for_tile_span(s, layout.iso_x_ratio)
-    local hd = IsoGround.hd_for_tile_span(s, layout.iso_y_ratio)
-    local eh = IsoGround.eh_for_tile_span(s, layout.iso_eh_ratio)
+    local hw = Tile.hw_for_tile_span(s, layout.iso_x_ratio)
+    local hd = Tile.hd_for_tile_span(s, layout.iso_y_ratio)
+    local eh = Tile.eh_for_tile_span(s, layout.iso_eh_ratio)
     local colors = palette_from_rgb(rgb, alpha)
     local yt = cy - eh
 

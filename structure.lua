@@ -5,9 +5,7 @@
 
 local anim8 = require("anim8")
 local Setup = require("setup")
-local Lookup = require("lookup")
-local Footprint = require("footprint")
-local IsoGround = require("ground")
+local Tile = require("tile")
 
 local catalogs = {}
 local set_mode
@@ -325,6 +323,94 @@ function Structure.is_piece(piece)
     return piece.structure ~= nil
 end
 
+function Structure.tile_span(kind)
+    local def = spec(kind)
+
+    if not def then
+        return 1, 1, 1
+    end
+
+    return def.tiles_w or 1, def.tiles_d or 1, def.tiles_h or 1
+end
+
+function Structure.has_kind(kind)
+    return spec(kind) ~= nil
+end
+
+local function structure_span(map)
+    return map.grid.structure_span
+end
+
+function Structure.covers_tile(map, piece, tile_x, tile_y)
+    if not Structure.is_piece(piece) then
+        return false
+    end
+
+    local w, d = structure_span(map)(piece.structure)
+    local lx = tile_x - piece.tile_x
+    local ly = tile_y - piece.tile_y
+
+    return lx >= 0 and lx < w and ly >= 0 and ly < d
+end
+
+function Structure.blocks_tile(map, tile_x, tile_y)
+    if not map then
+        return false
+    end
+
+    for _, piece in ipairs(map.structure_pieces or {}) do
+        if not piece._removed
+            and Structure.covers_tile(map, piece, tile_x, tile_y)
+        then
+            return true
+        end
+    end
+
+    return false
+end
+
+function Structure.find_by_id(map, structure_id)
+    if not map or not structure_id then
+        return nil
+    end
+
+    for _, piece in ipairs(map.structure_pieces or {}) do
+        if piece.structure_id == structure_id then
+            return piece
+        end
+    end
+end
+
+function Structure.find_at(map, tile_x, tile_y)
+    if not map then
+        return nil
+    end
+
+    for _, piece in ipairs(map.structure_pieces or {}) do
+        if not piece._removed
+            and Structure.covers_tile(map, piece, tile_x, tile_y)
+        then
+            return piece
+        end
+    end
+end
+
+function Structure.footprint_cells(map, tile_x, tile_y, kind)
+    local w, d = structure_span(map)(kind)
+    local cells = {}
+
+    for ly = 0, d - 1 do
+        for lx = 0, w - 1 do
+            cells[#cells + 1] = {
+                tile_x = tile_x + lx,
+                tile_y = tile_y + ly,
+            }
+        end
+    end
+
+    return cells
+end
+
 function Structure.load()
     for kind, def in pairs(Setup.get().structures) do
         if def.path and def.w and def.h then
@@ -384,11 +470,8 @@ function Structure.draw(piece, lg, layout, alpha, z_at)
 
     local scale = layout.scale or 1
     alpha = alpha or 1
-    local w, d = Lookup.structure_tile_span(
-        Setup.get().structures,
-        piece.structure
-    )
-    local feet_x, feet_y = Footprint.feet_screen(layout, {
+    local w, d = Structure.tile_span(piece.structure)
+    local feet_x, feet_y = Tile.feet_screen(layout, {
         ox = piece.tile_x,
         oy = piece.tile_y,
         tiles_w = w,
@@ -402,8 +485,8 @@ function Structure.draw(piece, lg, layout, alpha, z_at)
     lg.setColor(1, 1, 1, alpha)
     piece.struct_anim.current:draw(
         catalog.image,
-        IsoGround.snap_px(feet_x),
-        IsoGround.snap_px(feet_y),
+        Tile.snap_px(feet_x),
+        Tile.snap_px(feet_y),
         0,
         scale,
         scale,

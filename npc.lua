@@ -1,11 +1,8 @@
 ﻿local anim8 = require("anim8")
 local Setup = require("setup")
-local Lookup = require("lookup")
-local Footprint = require("footprint")
-local Walk = require("walk")
+local Path = require("path")
 local Placement = require("placement")
 local Tile = require("tile")
-local IsoGround = require("ground")
 
 local WALK_SPEED = 3
 local FACING_AXIS_EPS = 0.001
@@ -22,7 +19,7 @@ local DIR8_VEC = {
 local T
 
 local function arrive_dist()
-    return IsoGround.pos_step() * 0.5
+    return Placement.pos_step() * 0.5
 end
 
 -- Scale px/py speed so screen travel matches ±x segments (e/w) for the same walkspeed.
@@ -36,7 +33,7 @@ local function walk_speed_for_segment(map, walkspeed, seg_dx, seg_dy)
     local layout = map and map.layout
 
     if not layout then
-        return walkspeed * (seg_len / IsoGround.pos_step())
+        return walkspeed * (seg_len / Placement.pos_step())
     end
 
     local ux = seg_dx / seg_len
@@ -453,24 +450,32 @@ local function finish_walk(state, piece, map)
     set_mode(state, "stand")
 end
 
+local function npc_spec(kind)
+    if not kind then
+        return nil
+    end
+
+    return Setup.get().npcs[kind]
+end
+
 local function ensure_catalog(kind)
     if catalogs[kind] then
         return catalogs[kind]
     end
 
-    local spec = Lookup.npc_spec(Setup.get().npcs, kind)
+    local def = npc_spec(kind)
 
-    if not spec then
+    if not def then
         error("unknown npc kind: " .. tostring(kind))
     end
 
-    catalogs[kind] = load_sheet(spec)
+    catalogs[kind] = load_sheet(def)
 
     return catalogs[kind]
 end
 
 local function npc_def(kind)
-    return Lookup.npc_spec(Setup.get().npcs, kind) or {}
+    return npc_spec(kind) or {}
 end
 
 local function spawn(opts)
@@ -596,7 +601,7 @@ local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
         goal_y = goal_node.py
     end
 
-    local path = Walk.find_path_pos(map, piece.pos_x, piece.pos_y, goal_x, goal_y)
+    local path = Path.find_path_pos(map, piece.pos_x, piece.pos_y, goal_x, goal_y)
 
     if path == nil then
         set_mode(state, "stand")
@@ -608,7 +613,7 @@ local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
     goal_node = goal_node or Placement.node_at_pos(map, goal_x, goal_y)
 
     state.final_z = tile_z ~= nil and tile_z or (
-        goal_node and goal_node.z or Walk.surface_z(map, goal_tx, goal_ty)
+        goal_node and goal_node.z or Path.surface_z(map, goal_tx, goal_ty)
     )
 
     if #path == 0 then
@@ -750,10 +755,50 @@ function Npc.clear_piece_walk(piece)
     end
 end
 
+function Npc.def(kind)
+    return npc_spec(kind)
+end
+
+function Npc.footprint(kind, overrides)
+    local def = npc_spec(kind) or {}
+    overrides = overrides or {}
+
+    return overrides.tiles_w or def.tiles_w or 1,
+        overrides.tiles_d or def.tiles_d or 1,
+        overrides.tiles_h or def.tiles_h or 1
+end
+
+function Npc.tile_span(kind)
+    return Npc.footprint(kind, nil)
+end
+
+function Npc.draw_offset(kind, overrides)
+    local def = npc_spec(kind) or {}
+    overrides = overrides or {}
+
+    local ox = overrides.draw_offset_x
+
+    if ox == nil then
+        ox = def.draw_offset_x or 0
+    end
+
+    local oy = overrides.draw_offset_y
+
+    if oy == nil then
+        oy = def.draw_offset_y or 0
+    end
+
+    return ox, oy
+end
+
+function Npc.catalog()
+    return Setup.get().npcs or {}
+end
+
 function Npc.preload_npcs()
     T = Setup.get().tile_size
 
-    for kind, _ in pairs(Lookup.npc_catalog(Setup.get().npcs)) do
+    for kind, _ in pairs(Npc.catalog()) do
         ensure_catalog(kind)
     end
 end
@@ -764,16 +809,8 @@ function Npc.load()
 end
 
 function Npc.sync_footprint(map, piece, kind, overrides)
-    local w, d, h = Lookup.npc_footprint(
-        Setup.get().npcs,
-        kind,
-        overrides
-    )
-    local draw_ox, draw_oy = Lookup.npc_draw_offset(
-        Setup.get().npcs,
-        kind,
-        overrides
-    )
+    local w, d, h = Npc.footprint(kind, overrides)
+    local draw_ox, draw_oy = Npc.draw_offset(kind, overrides)
 
     piece.tiles_w = w
     piece.tiles_d = d
@@ -934,7 +971,7 @@ function Npc.npc_tile_span(piece)
         return 1, 1, 1
     end
 
-    local dw, dd, dh = Lookup.npc_tile_span(Setup.get().npcs, kind)
+    local dw, dd, dh = Npc.tile_span(kind)
 
     return piece.tiles_w or dw, piece.tiles_d or dd, piece.tiles_h or dh
 end
@@ -964,7 +1001,7 @@ function Npc.draw(piece, lg, layout, alpha, z_at)
     else
         local w, d = Npc.npc_tile_span(piece)
         feet_x, feet_y =
-            Footprint.feet_screen_from_piece(layout, piece, w, d, z_at)
+            Tile.feet_screen_from_piece(layout, piece, w, d, z_at)
     end
 
     local draw_ox = piece.draw_offset_x or 0
@@ -973,8 +1010,8 @@ function Npc.draw(piece, lg, layout, alpha, z_at)
     lg.setColor(1, 1, 1, alpha)
     piece.npc.current:draw(
         catalog.image,
-        IsoGround.snap_px(feet_x + draw_ox),
-        IsoGround.snap_px(feet_y + draw_oy),
+        Tile.snap_px(feet_x + draw_ox),
+        Tile.snap_px(feet_y + draw_oy),
         0,
         scale,
         scale,
