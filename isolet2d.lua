@@ -23,6 +23,7 @@ local CULL_CACHE_PAD_TILES = 1
 local CULL_MAX_Z = 1
 
 local current_map
+local pick_marker
 
 local function active_map()
     if not current_map then
@@ -298,6 +299,9 @@ function M.create_map(src)
         pieces_updates = nil,
         pieces_removals = nil,
         pending_ops = nil,
+        npc_paused = false,
+        structure_paused = false,
+        projectile_paused = false,
     }
 
     M.bind_grid(map, src)
@@ -334,6 +338,109 @@ function M.pick_placement_near(px, py, radius)
     return Path.pick_reachable_near(active_map(), px, py, radius)
 end
 
+local function point_in_tile_top(layout, wx, wy, tile_x, tile_y, tile_z)
+    local cx, cy = Tile.to_screen(layout, tile_x, tile_y, tile_z)
+    local s = layout.scale or 1
+    local tile_px = layout.tile_size * s
+    local hw = Tile.hw_for_tile_span(tile_px, layout.iso_x_ratio)
+    local hd = Tile.hd_for_tile_span(tile_px, layout.iso_y_ratio)
+    local eh = Tile.eh_for_tile_span(tile_px, layout.iso_eh_ratio)
+    local yt = cy - eh
+
+    return math.abs(wx - cx) / hw + math.abs(wy - yt) / hd <= 1.001
+end
+
+local function pick_max_z(map)
+    local max_z = 0
+    local cache = map.height_at_cache
+
+    if not cache then
+        return max_z
+    end
+
+    for _, row in pairs(cache) do
+        for _, height in pairs(row) do
+            if height > 0 then
+                max_z = math.max(max_z, height - 1)
+            end
+        end
+    end
+
+    return max_z
+end
+
+local function pick_candidates(layout, wx, wy, max_z)
+    local seen = {}
+    local list = {}
+
+    local function add(tile_x, tile_y)
+        local key = tile_x .. "," .. tile_y
+
+        if seen[key] then
+            return
+        end
+
+        seen[key] = true
+        list[#list + 1] = { tile_x, tile_y }
+    end
+
+    for z_try = 0, max_z do
+        local tx0, ty0 = Tile.from_screen(layout, wx, wy, z_try)
+        local base_tx = math.floor(tx0 + 0.5)
+        local base_ty = math.floor(ty0 + 0.5)
+
+        for oy = -1, 1 do
+            for ox = -1, 1 do
+                add(base_tx + ox, base_ty + oy)
+            end
+        end
+    end
+
+    return list
+end
+
+local function pick_tile_at_world(map, wx, wy)
+    local layout = map.layout
+    local grid = map.grid
+
+    if not layout or not grid then
+        return nil
+    end
+
+    local best
+    local best_depth = -math.huge
+    local max_z = pick_max_z(map)
+
+    for _, candidate in ipairs(pick_candidates(layout, wx, wy, max_z)) do
+        local tile_x = candidate[1]
+        local tile_y = candidate[2]
+
+        if grid.in_bounds(tile_x, tile_y) and grid.height_at(tile_x, tile_y) > 0 then
+            local z = grid.surface_z(tile_x, tile_y)
+
+            if point_in_tile_top(layout, wx, wy, tile_x, tile_y, z) then
+                local depth = tile_x + tile_y + z
+
+                if depth > best_depth then
+                    best_depth = depth
+
+                    best = {
+                        tile_x = tile_x,
+                        tile_y = tile_y,
+                        z = z,
+                        in_bounds = true,
+                        walkable = grid.walkable_at(tile_x, tile_y),
+                        sx = wx,
+                        sy = wy,
+                    }
+                end
+            end
+        end
+    end
+
+    return best
+end
+
 function M.try_step_neighbor(from_px, from_py, cell_dx, cell_dy)
     return Path.try_step_neighbor(
         active_map(),
@@ -346,6 +453,130 @@ end
 
 function M.on_walkable_cell(piece)
     return Placement.on_walkable_cell(active_map(), piece)
+end
+
+function M.placement_pos(ix, iy)
+    local node = Placement.cell_node(active_map(), ix, iy)
+
+    if not node then
+        return nil, nil
+    end
+
+    return node.px, node.py
+end
+
+function M.placement_to_design(px, py, tile_z)
+    local map = active_map()
+    local sx, sy = Tile.placement_to_screen(map.layout, px, py, tile_z or 0)
+
+    return sx + Camera.pan_x, sy + Camera.pan_y
+end
+
+function M.clear_projectiles()
+    Projectile.clear(active_map())
+end
+
+function M.projectile_count()
+    return Projectile.count(active_map())
+end
+
+function M.each_projectile(fn)
+    Projectile.each(active_map(), fn)
+end
+
+function M.set_npc_paused(paused)
+    local map = active_map()
+
+    if map then
+        map.npc_paused = paused == true
+    end
+end
+
+function M.set_structure_paused(paused)
+    local map = active_map()
+
+    if map then
+        map.structure_paused = paused == true
+    end
+end
+
+function M.is_npc_paused()
+    local map = active_map()
+
+    return map and map.npc_paused == true
+end
+
+function M.is_structure_paused()
+    local map = active_map()
+
+    return map and map.structure_paused == true
+end
+
+function M.pause_npc()
+    M.set_npc_paused(true)
+end
+
+function M.play_npc()
+    M.set_npc_paused(false)
+end
+
+function M.pause_structure()
+    M.set_structure_paused(true)
+end
+
+function M.play_structure()
+    M.set_structure_paused(false)
+end
+
+function M.set_projectile_paused(paused)
+    local map = active_map()
+
+    if map then
+        map.projectile_paused = paused == true
+    end
+end
+
+function M.is_projectile_paused()
+    local map = active_map()
+
+    return map and map.projectile_paused == true
+end
+
+function M.pause_projectile()
+    M.set_projectile_paused(true)
+end
+
+function M.play_projectile()
+    M.set_projectile_paused(false)
+end
+
+local function terrain_cache_key(rect)
+    if not rect then
+        return nil
+    end
+
+    return rect.min_tx
+        .. ","
+        .. rect.min_ty
+        .. ","
+        .. rect.max_tx
+        .. ","
+        .. rect.max_ty
+end
+
+local function terrain_render_cache(map, cache_rect)
+    local key = terrain_cache_key(cache_rect)
+
+    if key and map._terrain_cache_key == key and map._terrain_cache then
+        return map._terrain_cache
+    end
+
+    local cache = Tile.build_render_cache(map, cache_rect)
+
+    map._terrain_cache_key = key
+    map._terrain_cache = cache
+
+    return cache
 end
 
 function M.can_step_pos(from_px, from_py, to_px, to_py)
@@ -597,6 +828,262 @@ local function piece_sort_key(piece, source, cache)
     return tx + ty + z, tx, ty
 end
 
+local function point_in_rect(wx, wy, x0, y0, x1, y1)
+    return wx >= x0 and wx <= x1 and wy >= y0 and wy <= y1
+end
+
+local function resolve_hit_size(def)
+    if not def then
+        return 1, 1
+    end
+
+    local hit = def.hit
+
+    if hit then
+        return hit.w or def.w or 1, hit.h or def.h or 1
+    end
+
+    return def.w or 1, def.h or 1
+end
+
+local function aabb_hit_bounds(anchor_x, anchor_y, box_w, box_h, scale)
+    local hw = box_w * 0.5 * scale
+    local h = box_h * scale
+
+    return anchor_x - hw, anchor_y - h, anchor_x + hw, anchor_y
+end
+
+local function npc_feet_screen(map, layout, piece, z_at)
+    if piece.pos_x ~= nil and piece.pos_y ~= nil then
+        return Tile.placement_to_screen(
+            layout,
+            piece.pos_x,
+            piece.pos_y,
+            piece.tile_z
+        )
+    end
+
+    local w, d = Npc.npc_tile_span(piece)
+
+    return Tile.feet_screen_from_piece(layout, piece, w, d, z_at)
+end
+
+local function structure_feet_screen(map, layout, piece, z_at)
+    local w, d = Structure.tile_span(piece.structure)
+
+    return Tile.feet_screen(layout, {
+        ox = piece.tile_x,
+        oy = piece.tile_y,
+        tiles_w = w,
+        tiles_d = d,
+        tile_z = piece.tile_z,
+        z_at = z_at,
+    })
+end
+
+local function pack_structure(piece)
+    if not piece then
+        return nil
+    end
+
+    return {
+        structure_id = piece.structure_id,
+        kind = piece.structure,
+    }
+end
+
+local function pack_npc(piece)
+    if not piece or not piece.npc then
+        return nil
+    end
+
+    return {
+        npc_id = piece.npc_id,
+        kind = piece.npc.kind,
+    }
+end
+
+local function pick_placement_at_world(map, layout, wx, wy)
+    local placement = map.placement
+
+    if not placement then
+        return nil
+    end
+
+    local max_dist = layout.tile_size * (layout.scale or 1) * 0.45
+    local max_d2 = max_dist * max_dist
+    local best
+    local best_d2
+
+    for _, node in ipairs(placement.nodes) do
+        local dx = node.sx - wx
+        local dy = node.sy - wy
+        local d2 = dx * dx + dy * dy
+
+        if d2 <= max_d2 and (not best_d2 or d2 < best_d2) then
+            best = node
+            best_d2 = d2
+        end
+    end
+
+    if not best then
+        return nil
+    end
+
+    return {
+        x = best.ix,
+        y = best.iy,
+        z = best.z,
+    }
+end
+
+local function npc_sprite_hit(map, layout, piece, wx, wy, z_at)
+    if not Npc.is_active(piece) then
+        return false
+    end
+
+    local def = Npc.def(piece.npc.kind)
+
+    if not def then
+        return false
+    end
+
+    local scale = layout.scale or 1
+    local feet_x, feet_y = npc_feet_screen(map, layout, piece, z_at)
+    local hit_w, hit_h = resolve_hit_size(def)
+    local x0, y0, x1, y1 = aabb_hit_bounds(feet_x, feet_y, hit_w, hit_h, scale)
+
+    return point_in_rect(wx, wy, x0, y0, x1, y1)
+end
+
+local function structure_sprite_hit(map, layout, piece, wx, wy, z_at)
+    if piece._removed or not Structure.is_piece(piece) then
+        return false
+    end
+
+    local def = cfg().structures[piece.structure]
+
+    if not def then
+        return false
+    end
+
+    local scale = layout.scale or 1
+    local feet_x, feet_y = structure_feet_screen(map, layout, piece, z_at)
+    local hit_w, hit_h = resolve_hit_size(def)
+    local x0, y0, x1, y1 = aabb_hit_bounds(feet_x, feet_y, hit_w, hit_h, scale)
+
+    return point_in_rect(wx, wy, x0, y0, x1, y1)
+end
+
+local function pick_sprite_target(map, layout, source, cache, wx, wy)
+    local z_at = function(tx, ty)
+        return Tile.top_z_from_cache(source, cache, tx, ty)
+    end
+    local best_depth = -math.huge
+    local best_type
+    local best_piece
+
+    for _, piece in ipairs(map.npc_pieces or {}) do
+        if npc_sprite_hit(map, layout, piece, wx, wy, z_at) then
+            local depth = piece_sort_key(piece, source, cache)
+
+            if depth > best_depth then
+                best_depth = depth
+                best_type = "npc"
+                best_piece = piece
+            end
+        end
+    end
+
+    for _, piece in ipairs(map.structure_pieces or {}) do
+        if structure_sprite_hit(map, layout, piece, wx, wy, z_at) then
+            local depth = piece_sort_key(piece, source, cache)
+
+            if depth > best_depth then
+                best_depth = depth
+                best_type = "structure"
+                best_piece = piece
+            end
+        end
+    end
+
+    return best_type, best_piece
+end
+
+function M.query_at_design(design_x, design_y)
+    local map = active_map()
+    local wx = design_x - Camera.pan_x
+    local wy = design_y - Camera.pan_y
+    local layout = map.layout
+    local source = map.source
+    local cache = Tile.build_render_cache(map, nil)
+    local tile_hit = pick_tile_at_world(map, wx, wy)
+    local tile
+
+    if tile_hit then
+        local terrain = Terrain.find_terrain_at(map, tile_hit.tile_x, tile_hit.tile_y)
+
+        tile = {
+            x = tile_hit.tile_x,
+            y = tile_hit.tile_y,
+            z = tile_hit.z,
+            walkable = tile_hit.walkable,
+            in_bounds = tile_hit.in_bounds,
+            mat = terrain and terrain.mat,
+        }
+    end
+
+    local placement = pick_placement_at_world(map, layout, wx, wy)
+    local structure_on_tile = tile and Structure.find_at(map, tile.x, tile.y)
+    local target_type, target_piece = pick_sprite_target(map, layout, source, cache, wx, wy)
+    local target
+    local npc
+    local structure = pack_structure(structure_on_tile)
+
+    if target_type == "npc" then
+        target = "npc"
+        npc = pack_npc(target_piece)
+    elseif target_type == "structure" then
+        target = "structure"
+        structure = pack_structure(target_piece)
+    elseif tile then
+        target = "ground"
+    end
+
+    if not tile and not target_type then
+        pick_marker = nil
+        return nil
+    end
+
+    pick_marker = { wx = wx, wy = wy }
+
+    return {
+        wx = wx,
+        wy = wy,
+        tile = tile,
+        placement = placement,
+        structure = structure,
+        npc = npc,
+        target = target,
+    }
+end
+
+function M.pick_at_design(design_x, design_y)
+    local map = active_map()
+    local wx = design_x - Camera.pan_x
+    local wy = design_y - Camera.pan_y
+    local hit = pick_tile_at_world(map, wx, wy)
+
+    if not hit then
+        return nil
+    end
+
+    hit.wx = wx
+    hit.wy = wy
+
+    return hit
+end
+
 local function tile_rect_for_viewport(layout, viewport, pad)
     if not viewport then
         return nil
@@ -672,7 +1159,7 @@ local function terrain_draw_max_z(map, source, cache)
 end
 
 local function draw_placement_debug(map, lg, layout, view_rect)
-    if not cfg().debug_draw_walkable or not view_rect then
+    if not cfg().debug_draw_map or not view_rect then
         return
     end
 
@@ -697,8 +1184,83 @@ local function draw_placement_debug(map, lg, layout, view_rect)
     end
 end
 
+local function draw_hit_debug(map, lg, layout, view_rect)
+    if not cfg().debug_draw_map or not view_rect then
+        return
+    end
+
+    local source = map.source
+    local cache = Tile.build_render_cache(map, view_rect)
+    local z_at = function(tx, ty)
+        return Tile.top_z_from_cache(source, cache, tx, ty)
+    end
+    local scale = layout.scale or 1
+
+    lg.setLineWidth(1)
+
+    for _, piece in ipairs(map.npc_pieces or {}) do
+        if piece.npc and not piece._removed then
+            local def = Npc.def(piece.npc.kind)
+
+            if def then
+                local feet_x, feet_y = npc_feet_screen(map, layout, piece, z_at)
+                local hit_w, hit_h = resolve_hit_size(def)
+                local x0, y0, x1, y1 = aabb_hit_bounds(
+                    feet_x,
+                    feet_y,
+                    hit_w,
+                    hit_h,
+                    scale
+                )
+
+                lg.setColor(0.35, 0.75, 1, 0.85)
+                lg.rectangle("line", x0, y0, x1 - x0, y1 - y0)
+            end
+        end
+    end
+
+    for _, piece in ipairs(map.structure_pieces or {}) do
+        if not piece._removed and Structure.is_piece(piece) then
+            local def = cfg().structures[piece.structure]
+
+            if def then
+                local feet_x, feet_y = structure_feet_screen(map, layout, piece, z_at)
+                local hit_w, hit_h = resolve_hit_size(def)
+                local x0, y0, x1, y1 = aabb_hit_bounds(
+                    feet_x,
+                    feet_y,
+                    hit_w,
+                    hit_h,
+                    scale
+                )
+
+                lg.setColor(1, 0.45, 0.9, 0.85)
+                lg.rectangle("line", x0, y0, x1 - x0, y1 - y0)
+            end
+        end
+    end
+
+    lg.setColor(1, 1, 1, 1)
+end
+
+local function draw_pick_marker(lg, layout)
+    if not cfg().debug_draw_map or not pick_marker then
+        return
+    end
+
+    local ts = layout.tile_size * (layout.scale or 1)
+    local r = math.max(4, ts * 0.06)
+
+    lg.setColor(1, 0.85, 0.1, 0.95)
+    lg.setLineWidth(2)
+    lg.circle("line", pick_marker.wx, pick_marker.wy, r)
+    lg.circle("fill", pick_marker.wx, pick_marker.wy, math.max(2, r * 0.25))
+    lg.setColor(1, 1, 1, 1)
+    lg.setLineWidth(1)
+end
+
 local function draw_npc_pos_debug(map, lg, layout, view_rect)
-    if not cfg().debug_draw_walkable or not view_rect then
+    if not cfg().debug_draw_map or not view_rect then
         return
     end
 
@@ -744,7 +1306,7 @@ function M.draw_map()
     local layout = current_map.layout
     local view_rect = tile_rect_for_viewport(layout, vp, CULL_PAD_TILES)
     local cache_rect = tile_rect_for_viewport(layout, vp, CULL_PAD_TILES + CULL_CACHE_PAD_TILES)
-    local cache = Tile.build_render_cache(current_map, cache_rect)
+    local cache = terrain_render_cache(current_map, cache_rect)
     local max_z = terrain_draw_max_z(current_map, source, cache)
 
     if source.background then
@@ -803,7 +1365,7 @@ function M.draw_map()
         end
 
         for _, piece in ipairs(current_map.npc_pieces or {}) do
-            if piece_in_view(piece, view_rect) then
+            if Npc.is_active(piece) and piece_in_view(piece, view_rect) then
                 local sum, tx, ty = piece_sort_key(piece, source, cache)
                 local npc_base_z = Tile.top_z_from_cache(source, cache, tx, ty)
                 local npc_top_z = npc_base_z + npc_tiles_h(piece) - 1
@@ -839,16 +1401,27 @@ function M.draw_map()
 
     draw_placement_debug(current_map, lg, layout, view_rect)
     draw_npc_pos_debug(current_map, lg, layout, view_rect)
+    draw_hit_debug(current_map, lg, layout, view_rect)
+    draw_pick_marker(lg, layout)
 
     love.graphics.pop()
 end
 
-function M.set_debug_draw_walkable(enable)
-    cfg().debug_draw_walkable = enable and true or false
+function M.set_pick_marker(wx, wy)
+    if wx == nil or wy == nil then
+        pick_marker = nil
+        return
+    end
+
+    pick_marker = { wx = wx, wy = wy }
 end
 
-function M.debug_draw_walkable()
-    return cfg().debug_draw_walkable == true
+function M.set_debug_draw_map(enable)
+    cfg().debug_draw_map = enable and true or false
+end
+
+function M.debug_draw_map()
+    return cfg().debug_draw_map == true
 end
 
 local function map_pan_bounds(src, layout)
@@ -889,7 +1462,10 @@ local function map_pan_bounds(src, layout)
 end
 
 function M.load_map(src)
+    pick_marker = nil
     current_map = M.create_map(src)
+    current_map._terrain_cache = nil
+    current_map._terrain_cache_key = nil
     M.preload_npcs(src)
 
     local min_x, min_y, max_x, max_y = map_pan_bounds(src, current_map.layout)
@@ -930,6 +1506,10 @@ local function apply_pending_ops(map, ops)
     for _, op in ipairs(ops) do
         if op.type == "npc.add" then
             Npc.add(map, op.piece, op.ev)
+        elseif op.type == "npc.place" then
+            Npc.place(map, op.ev)
+        elseif op.type == "npc.retire" then
+            Npc.retire(map, op.id)
         elseif op.type == "structure.add" then
             Structure.init_piece(op.piece, op.ev)
 

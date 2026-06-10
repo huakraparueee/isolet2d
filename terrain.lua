@@ -698,14 +698,6 @@ local function palette_from_rgb(rgb, alpha)
     }
 end
 
-local function stack_mat_id(tile_z, top_z)
-    if tile_z == top_z then
-        return Setup.get().terrain_stack_top
-    end
-
-    return Setup.get().terrain_stack_fill
-end
-
 local function top_mat_at(map, tile_x, tile_y)
     local source = map.source
     local height_cache = map.height_at_cache
@@ -879,9 +871,11 @@ local function autotile_mask(map, tile_x, tile_y, mat, z)
 end
 
 local function mat_sprite(map, tile_x, tile_y, tile_z, top_z, mat)
-    local id = mat or stack_mat_id(tile_z, top_z)
+    if not mat then
+        return nil
+    end
 
-    if mat and mat_autotile[mat] and tile_z == top_z then
+    if mat_autotile[mat] and tile_z == top_z then
         local variants = mat_variants[mat]
 
         if variants then
@@ -900,31 +894,13 @@ local function mat_sprite(map, tile_x, tile_y, tile_z, top_z, mat)
         end
     end
 
-    if mat and mat_sheets[mat] then
+    if mat_sheets[mat] then
         local sheet = mat_sheets[mat]
 
         return sheet.image, sheet.w, sheet.h, mat_anims[mat]
     end
 
-    local image = mat_image_at(id, tile_x, tile_y, tile_z)
-
-    if image then
-        return image, image:getWidth(), image:getHeight(), nil
-    end
-
-    if mat then
-        return nil
-    end
-
-    local c = Setup.get()
-    local top_id = c.terrain_stack_top
-    local fill_id = c.terrain_stack_fill
-
-    if id ~= top_id then
-        image = mat_image_at(top_id, tile_x, tile_y, tile_z)
-    else
-        image = mat_image_at(fill_id, tile_x, tile_y, tile_z)
-    end
+    local image = mat_image_at(mat, tile_x, tile_y, tile_z)
 
     if image then
         return image, image:getWidth(), image:getHeight(), nil

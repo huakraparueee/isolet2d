@@ -33,9 +33,7 @@ function M.build(raw)
         structures = raw.structures,
         npcs = raw.npcs,
         projectiles = raw.projectiles,
-        terrain_stack_top = raw.terrain_stack_top,
-        terrain_stack_fill = raw.terrain_stack_fill,
-        debug_draw_walkable = raw.debug_draw_walkable == true,
+        debug_draw_map = raw.debug_draw_map == true,
     }
 end
 

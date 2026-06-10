@@ -6,6 +6,8 @@ LÖVE 11.x library for stacked isometric maps (terrain, structures, NPCs).
 
 **Typical loop:** `Iso.init(cfg)` → `Iso.load_map(src)` → each frame `Iso.tick(dt)` and `Iso.draw_map()`.
 
+**Example game:** [bullet2d](https://github.com/huakraparueee/bullet2d) — wave-based bullet-hell demo with pre-spawned stages, enemy scaling, player upgrades, `npc.shoot` / `projectile.spawn`, `on_hit` callbacks, and placement-graph player movement.
+
 ---
 
 ## Install
@@ -109,14 +111,78 @@ These operate on the active map's `placement` graph (sub-tile walk nodes). NPC `
 
 Placement nodes expose `ix`, `iy`, `px`, `py`, `z`, `tile_x`, `tile_y`, `sx`, `sy`.
 
+### Coordinate helpers
+
+| Function                                   | Returns        | Description                                                        |
+| ------------------------------------------ | -------------- | ------------------------------------------------------------------ |
+| `Iso.placement_pos(ix, iy)`                | `px, py \| nil` | World position of a placement cell, or `nil` if missing             |
+| `Iso.placement_to_design(px, py, tile_z?)` | `x, y`         | Screen position in design space (includes current camera pan)      |
+
+### Picking (design space)
+
+Pass **design-space** coordinates (after your window→design transform, **before** camera pan — the functions subtract pan internally).
+
+| Function                                | Returns   | Description                                                                 |
+| --------------------------------------- | --------- | --------------------------------------------------------------------------- |
+| `Iso.query_at_design(design_x, design_y)` | `table \| nil` | Full hit query (see below)                                            |
+| `Iso.pick_at_design(design_x, design_y)`  | `table \| nil` | Tile under the cursor only (lighter)                                    |
+| `Iso.set_pick_marker(wx, wy)`             | —         | Set or clear (`nil`) the debug pick marker in map-local coordinates         |
+
+`query_at_design` return value (when not `nil`):
+
+| Field         | Description                                                                 |
+| ------------- | --------------------------------------------------------------------------- |
+| `wx`, `wy`    | Map-local coordinates (camera pan subtracted)                               |
+| `tile`        | `{ x, y, z, walkable, in_bounds, mat? }` — top terrain tile at pointer      |
+| `placement`   | `{ x, y, z }` — nearest placement cell (`ix`, `iy`, surface `z`), if any    |
+| `structure`   | `{ structure_id, kind }` — structure on tile or under sprite hit            |
+| `npc`         | `{ npc_id, kind }` — NPC under sprite hit, if any                           |
+| `target`      | `"npc"`, `"structure"`, `"ground"`, or omitted                              |
+
+Sprite hits use an axis-aligned box anchored at the entity feet. Optional `hit = { w, h }` on NPC/structure config overrides the default (`w`/`h` from the sprite frame).
+
+`pick_at_design` returns `{ tile_x, tile_y, z, in_bounds, walkable, sx, sy, wx, wy }`.
+
+Successful `query_at_design` calls also update the pick marker when `debug_draw_map` is enabled.
+
+### Projectile helpers
+
+| Function                    | Description                                      |
+| --------------------------- | ------------------------------------------------ |
+| `Iso.clear_projectiles()`   | Remove all in-flight projectiles on the active map |
+| `Iso.projectile_count()`    | Number of live projectiles                       |
+| `Iso.each_projectile(fn)`   | Call `fn(projectile)` for each live projectile   |
+
+### Pause controls
+
+Pause flags stop **updates** for that layer during `tick`; drawing still runs. `is_blocked()` is unchanged (walking NPCs and in-flight projectiles still block input unless cleared).
+
+| Function / alias                              | Description                          |
+| --------------------------------------------- | ------------------------------------ |
+| `Iso.set_npc_paused(paused)` / `pause_npc()` / `play_npc()` | Freeze or resume NPC movement and mode animation |
+| `Iso.is_npc_paused()`                         | Current NPC pause flag               |
+| `Iso.set_structure_paused(paused)` / `pause_structure()` / `play_structure()` | Freeze or resume structure mode animation |
+| `Iso.is_structure_paused()`                   | Current structure pause flag         |
+| `Iso.set_projectile_paused(paused)` / `pause_projectile()` / `play_projectile()` | Freeze or resume projectile motion |
+| `Iso.is_projectile_paused()`                  | Current projectile pause flag        |
+
+Flags live on the active map as `map.npc_paused`, `map.structure_paused`, `map.projectile_paused`.
+
 ### Debug
 
-| Function                              | Description                                                              |
-| ------------------------------------- | ------------------------------------------------------------------------ |
-| `Iso.set_debug_draw_walkable(enable)` | Toggle overlay of placement nodes (green) and NPC anchor positions (red) |
-| `Iso.debug_draw_walkable()`           | Current debug-draw flag                                                  |
+| Function                         | Description                                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------------------- |
+| `Iso.set_debug_draw_map(enable)` | Toggle map debug overlay                                                                     |
+| `Iso.debug_draw_map()`           | Current debug-draw flag                                                                      |
 
-Can also set `debug_draw_walkable = true` in the init config.
+When enabled, `draw_map` overlays:
+
+- Placement walk nodes (green)
+- NPC and structure sprite hit boxes (cyan / magenta)
+- NPC placement anchor positions (red)
+- Last pick marker from `query_at_design` (yellow)
+
+Can also set `debug_draw_map = true` in the init config.
 
 ### `Iso.camera`
 
@@ -144,7 +210,7 @@ Submodule for panning in design space (see [Camera](#camera-module)).
 | `terrain_stack_top`   | string?  | Material id for top stack layer sprite fallback |
 | `terrain_stack_fill`  | string?  | Material id for lower stack layers fallback     |
 | `grid_point_per_tile` | number?  | Sub-tile walk grid density (default `2`)        |
-| `debug_draw_walkable` | boolean? | Enable placement debug overlay                  |
+| `debug_draw_map`      | boolean? | Enable map debug overlay (placement, hits, pick) |
 
 ### `terrain_mats[id]`
 
@@ -174,6 +240,7 @@ Autotile variant names: `solo`, `n`, `e`, `s`, `w`, `n_e`, `e_s`, `n_s`, `w_s`, 
 | `w`, `h`                        | Frame size in pixels                                                                                |
 | `sheet_w`, `sheet_h`            | Optional full sheet size check                                                                      |
 | `tiles_w`, `tiles_d`, `tiles_h` | Footprint (default `1`)                                                                             |
+| `hit`                           | Optional `{ w, h }` sprite hit box for `query_at_design` (defaults to frame `w`/`h`)                |
 | `modes`                         | Mode name → `{ cols, interval, loop?, count?, pause?, after_mode?, row? }`. Omit for static frame 1 |
 
 ### `npcs[kind]`
@@ -185,6 +252,7 @@ Autotile variant names: `solo`, `n`, `e`, `s`, `w`, `n_e`, `e_s`, `n_s`, `w_s`, 
 | `w`, `h`                         | Frame size                                          |
 | `tiles_w`, `tiles_d`, `tiles_h`  | Footprint (default `1`)                             |
 | `draw_offset_x`, `draw_offset_y` | Screen offset from feet anchor                      |
+| `hit`                            | Optional `{ w, h }` sprite hit box for `query_at_design` (defaults to frame `w`/`h`) |
 | `facing`                         | Default facing (`"left"`, `"right"`, or 8-dir name) |
 | `modes`                          | Mode name → clip spec (see below)                   |
 
@@ -415,6 +483,12 @@ Iso.run({
     { type = "terrain.add", tile_x = 0, tile_y = 0, mat = "grass" },
     { type = "npc.add", id = "a", kind = "player", tile_x = 0, tile_y = 0 },
 })
+
+-- Pick NPC or tile under cursor (design_x/y from your letterbox transform)
+local hit = Iso.query_at_design(mx, my)
+if hit and hit.target == "npc" then
+    Iso.run({ type = "npc.set_mode", id = hit.npc.npc_id, mode = "hurt" })
+end
 ```
 
 ---
@@ -467,6 +541,7 @@ Returned table (selected fields):
 | `layout`                               | Ground layout from `layout_for`              |
 | `placement`                            | Walk-node graph (`nodes`, `by_cell`)         |
 | `projectiles`                          | Live projectile instances (transient)        |
+| `npc_paused`, `structure_paused`, `projectile_paused` | Pause flags set via facade pause helpers |
 | `grid`                                 | See below                                    |
 | `height_at_cache`, `walkable_at_cache` | Per-tile caches                              |
 | `terrain_bake_max_z`                   | Highest baked terrain Z (internal draw hint) |

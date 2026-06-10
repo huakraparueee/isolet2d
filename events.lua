@@ -230,6 +230,25 @@ local function npc_remove(map, ev)
     })
 end
 
+local function npc_place(map, ev)
+    if not ev.id then
+        error("npc.place requires id")
+    end
+
+    if not ev.kind then
+        error("npc.place requires kind")
+    end
+
+    queue_op(map, { type = "npc.place", ev = ev })
+end
+
+local function npc_retire(map, ev)
+    queue_op(map, {
+        type = "npc.retire",
+        id = ev.id or ev.npc_id,
+    })
+end
+
 local function npc_shoot(map, ev)
     queue_op(map, { type = "npc.shoot", ev = ev })
 end
@@ -460,6 +479,8 @@ local HANDLERS = {
     ["structure.remove"] = structure_remove,
     ["structure.set_mode"] = structure_set_mode,
     ["npc.add"] = npc_add,
+    ["npc.place"] = npc_place,
+    ["npc.retire"] = npc_retire,
     ["npc.set_mode"] = npc_set_mode,
     ["npc.walk_to"] = npc_walk_to,
     ["npc.shoot"] = npc_shoot,

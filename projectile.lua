@@ -12,7 +12,27 @@ local Tile = require("tile")
 local Projectile = {}
 
 local catalogs = {}
+local pool = {}
 local next_id = 1
+local MAX_ACTIVE = 32
+
+local function release(proj)
+    for k in pairs(proj) do
+        proj[k] = nil
+    end
+
+    pool[#pool + 1] = proj
+end
+
+local function take()
+    return table.remove(pool) or {}
+end
+
+local function active_count(map)
+    local list = map.projectiles
+
+    return list and #list or 0
+end
 
 local function spec(kind)
     local cfg = Setup.get().projectiles or {}
@@ -225,37 +245,58 @@ end
 function Projectile.spawn(map, ev)
     ev = ev or {}
 
+    map.projectiles = map.projectiles or {}
+
+    if active_count(map) >= MAX_ACTIVE then
+        return nil
+    end
+
     local kind = ev.kind or ev.projectile or "bolt"
     local opts = merge_spec(kind, ev)
     local from_px, from_py, from_z, from_piece = resolve_from(map, ev)
     local to_px, to_py, to_z = resolve_to(map, ev)
+    local proj = take()
 
-    map.projectiles = map.projectiles or {}
-    map.projectiles[#map.projectiles + 1] = {
-        id = unique_id(ev),
-        kind = kind,
-        move = opts.move,
-        duration = opts.duration,
-        arc_height = opts.arc_height,
-        catalog = opts.catalog,
-        from_px = from_px,
-        from_py = from_py,
-        from_z = from_z,
-        to_px = to_px,
-        to_py = to_py,
-        to_z = to_z,
-        px = from_px,
-        py = from_py,
-        z = from_z,
-        elapsed = 0,
-        t = 0,
-        draw_offset_x = ev.draw_offset_x,
-        draw_offset_y = ev.draw_offset_y,
-        on_hit = ev.on_hit,
-        from_piece = from_piece,
-    }
+    proj.id = unique_id(ev)
+    proj.kind = kind
+    proj.move = opts.move
+    proj.duration = opts.duration
+    proj.arc_height = opts.arc_height
+    proj.catalog = opts.catalog
+    proj.from_px = from_px
+    proj.from_py = from_py
+    proj.from_z = from_z
+    proj.to_px = to_px
+    proj.to_py = to_py
+    proj.to_z = to_z
+    proj.px = from_px
+    proj.py = from_py
+    proj.z = from_z
+    proj.elapsed = 0
+    proj.t = 0
+    proj.draw_offset_x = ev.draw_offset_x
+    proj.draw_offset_y = ev.draw_offset_y
+    proj.on_hit = ev.on_hit
+    proj.from_piece = from_piece
+    proj.meta = ev.meta
 
-    return map.projectiles[#map.projectiles]
+    map.projectiles[#map.projectiles + 1] = proj
+
+    return proj
+end
+
+function Projectile.count(map)
+    return active_count(map)
+end
+
+function Projectile.each(map, fn)
+    if not fn then
+        return
+    end
+
+    for _, proj in ipairs(map.projectiles or {}) do
+        fn(proj)
+    end
 end
 
 function Projectile.queue_spawn(map, spawn_ev, delay)
@@ -372,6 +413,21 @@ function Projectile.find_by_id(map, id)
     end
 end
 
+function Projectile.clear(map)
+    if not map then
+        return
+    end
+
+    if map.projectiles then
+        for i = #map.projectiles, 1, -1 do
+            release(map.projectiles[i])
+        end
+    end
+
+    map.projectiles = nil
+    map.projectile_pending = nil
+end
+
 function Projectile.is_busy(map)
     local pending = map.projectile_pending
 
@@ -407,6 +463,10 @@ local function update_pending(map, dt)
 end
 
 function Projectile.update(map, dt)
+    if map.projectile_paused then
+        return
+    end
+
     update_pending(map, dt)
 
     local list = map.projectiles
@@ -427,7 +487,9 @@ function Projectile.update(map, dt)
             proj.py = proj.to_py
             proj.z = proj.to_z
             finish_projectile(map, proj)
-            table.remove(list, i)
+            list[i] = list[#list]
+            list[#list] = nil
+            release(proj)
         else
             proj.px = proj.from_px + (proj.to_px - proj.from_px) * t
             proj.py = proj.from_py + (proj.to_py - proj.from_py) * t

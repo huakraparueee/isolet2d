@@ -445,6 +445,10 @@ function Structure.set_mode(map, mode, id_filter, play_opts)
 end
 
 function Structure.update(map, dt)
+    if map.structure_paused then
+        return
+    end
+
     for _, piece in ipairs(map.structure_pieces or {}) do
         if piece.struct_anim and piece.struct_anim.current then
             piece.struct_anim.current:update(dt)

@@ -868,6 +868,122 @@ function Npc.add(map, piece, ev)
                 .. tostring(ev.tile_y)
         )
     end
+
+    piece.alpha = ev.alpha or 1
+    piece._pooled = false
+end
+
+function Npc.activate(map, piece, ev)
+    ev = ev or {}
+
+    local kind = ev.kind or piece.npc.kind
+
+    Npc.clear_piece_walk(piece)
+
+    if piece.npc.kind ~= kind then
+        Npc.sync_footprint(map, piece, kind, ev)
+
+        piece.npc = spawn({
+            kind = kind,
+            facing = ev.facing,
+            mode = ev.mode,
+            play = {
+                loop = ev.loop,
+                count = ev.count,
+                after_mode = ev.after_mode,
+            },
+        })
+    else
+        Npc.sync_footprint(map, piece, kind, ev)
+
+        if ev.facing then
+            Npc.apply_facing(piece, ev.facing)
+        end
+
+        local play_opts
+
+        if ev.play or ev.loop or ev.count or ev.after_mode then
+            play_opts = ev.play or {
+                loop = ev.loop,
+                count = ev.count,
+                after_mode = ev.after_mode,
+            }
+        end
+
+        set_mode(piece.npc, ev.mode or "stand", play_opts)
+    end
+
+    if not Placement.spawn_at(map, piece, ev.tile_x, ev.tile_y) then
+        error(
+            "npc.place: no placement node at "
+                .. tostring(ev.tile_x)
+                .. ","
+                .. tostring(ev.tile_y)
+        )
+    end
+
+    piece.alpha = ev.alpha or 1
+    piece._pooled = false
+end
+
+function Npc.place(map, ev)
+    ev = ev or {}
+
+    local id = ev.id or ev.npc_id
+
+    if not id then
+        error("npc.place requires id")
+    end
+
+    if not ev.kind then
+        error("npc.place requires kind")
+    end
+
+    local piece = Npc.find_by_id(map, id)
+
+    if piece and piece.npc then
+        Npc.activate(map, piece, ev)
+        return piece
+    end
+
+    piece = {
+        npc_id = id,
+        alpha = 1,
+        _pooled = false,
+    }
+
+    map.pieces[#map.pieces + 1] = piece
+    map.npc_pieces = map.npc_pieces or {}
+    map.npc_pieces[#map.npc_pieces + 1] = piece
+    Npc.add(map, piece, ev)
+
+    return piece
+end
+
+function Npc.retire(map, id_filter)
+    if not map.pieces then
+        return
+    end
+
+    for _, piece in ipairs(map.pieces) do
+        if piece.npc and want_id(piece.npc_id, id_filter) then
+            Npc.clear_piece_walk(piece)
+
+            if piece.npc.mode ~= "stand" or piece.npc.mode_busy then
+                set_mode(piece.npc, "stand")
+            end
+
+            piece.alpha = 0
+            piece._pooled = true
+        end
+    end
+end
+
+function Npc.is_active(piece)
+    return piece
+        and piece.npc
+        and not piece._removed
+        and not piece._pooled
 end
 
 function Npc.set_mode(map, mode, id_filter, play_opts)
@@ -957,8 +1073,12 @@ function Npc.is_busy(map)
 end
 
 function Npc.update(map, dt)
+    if map.npc_paused then
+        return
+    end
+
     for _, piece in ipairs(map.npc_pieces or {}) do
-        if piece.npc then
+        if Npc.is_active(piece) then
             update_state(piece.npc, piece, map, dt)
         end
     end
