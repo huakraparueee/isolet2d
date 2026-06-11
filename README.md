@@ -11,13 +11,47 @@ A **LÖVE 11.x** library for stacked isometric maps — terrain cubes, structure
 
 ## Quick start
 
+Register a custom loader so `require` resolves through `love.filesystem` (works in fused `.exe` builds; `package.path` alone often does not):
+
 ```lua
-package.path = package.path .. ";lib/isolet2d/?.lua"
+local ISOLET_DIR = "libraries/isolet2d/"
+
+local function isolet_loader(name)
+    local path = ISOLET_DIR .. name .. ".lua"
+    if love.filesystem.getInfo(path) then
+        local chunk, err = load(love.filesystem.read(path), "@" .. path)
+        if not chunk then
+            error(err)
+        end
+        return chunk
+    end
+end
+
+table.insert(package.loaders, 2, isolet_loader)
+
 local Iso = require("isolet2d")
 
 function love.load()
-    Iso.init(iso_cfg)
-    Iso.load_map(map_src)
+    Iso.init({
+        terrain_mats = {
+            grass = { color = { 0.35, 0.72, 0.28 }, walkable = true },
+            dirt  = { color = { 0.55, 0.38, 0.22 }, walkable = true },
+            water = { color = { 0.2, 0.45, 0.85 }, walkable = false, alpha = 0.85 },
+        }
+    })
+    Iso.load_map({
+        stacks = {
+            { "gd", "gg", "gd" },
+            { "gg", "gw", "gg" },
+            { "gd", "gg", "gd" },
+        },
+        stack_chars = {
+            g = "grass",
+            d = "dirt",
+            w = "water",
+        },
+        background = { R = 0.12, G = 0.16, B = 0.22 },
+    })
 end
 
 function love.update(dt)
@@ -29,6 +63,10 @@ function love.draw()
     Iso.draw_map()
 end
 ```
+
+Run the loader setup once before any `require("isolet2d")` or internal isolet2d module load (e.g. top of `main.lua`). Set `ISOLET_DIR` to match where you copied the library inside your game project.
+
+`iso_cfg` holds global layout and asset definitions (`terrain_mats`, `structures`, `npcs`, `projectiles`). `map_src` is per-stage terrain: `stacks` rows map to depth (`tiles_d`), columns to width (`tiles_w`); each character in a cell is one layer from the bottom up. See [docs/api.md](docs/api.md) for every field. For sprites, NPC modes, and a full game wiring example, see [bullet2d](https://github.com/huakraparueee/bullet2d).
 
 Use `Iso.is_blocked()` before player input while terrain jobs, NPC movement, or projectiles are active. For direct player movement on the placement graph, use `Iso.can_step_pos()`, `Iso.try_step_neighbor()`, and `Iso.pick_placement_near()`. For mouse/touch picking in design space, use `Iso.query_at_design()` or the lighter `Iso.pick_at_design()`.
 
@@ -56,8 +94,10 @@ Good reference for wiring `Iso.init` / `load_map` / `tick` / `draw_map`, handlin
 
 ## Install
 
-1. Copy all `.lua` files from this repo into your game (e.g. `lib/isolet2d/`).
-2. Add that folder to `package.path` (see quick start).
+1. Copy all `.lua` files from this repo into your game (e.g. `libraries/isolet2d/`).
+2. Register the `isolet_loader` from the quick start (set `ISOLET_DIR` to that folder).
+
+Internal modules (`stack`, `terrain`, …) use flat `require` names and must stay in the same directory as `isolet2d.lua`.
 
 ## Repository layout
 
@@ -83,10 +123,10 @@ isolet2d/
 
 ## Documentation
 
-| Doc                        | Contents                                                                                  |
-| -------------------------- | ----------------------------------------------------------------------------------------- |
-| [docs/api.md](docs/api.md) | Config, map source, events, projectiles, placement, movement, picking, pause, camera, map object |
-| [bullet2d](https://github.com/huakraparueee/bullet2d) | Full game example — stages, combat, progression, and isolet2d integration patterns |
+| Doc                                                   | Contents                                                                                         |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| [docs/api.md](docs/api.md)                            | Config, map source, events, projectiles, placement, movement, picking, pause, camera, map object |
+| [bullet2d](https://github.com/huakraparueee/bullet2d) | Full game example — stages, combat, progression, and isolet2d integration patterns               |
 
 ## Third-party
 

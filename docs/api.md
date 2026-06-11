@@ -12,22 +12,42 @@ LÖVE 11.x library for stacked isometric maps (terrain, structures, NPCs).
 
 ## Install
 
-Copy all `.lua` files into your game (e.g. `lib/isolet2d/`) and extend `package.path`:
+Copy all `.lua` files into your game (e.g. `libraries/isolet2d/`).
+
+For fused LÖVE builds (`.exe`, `.app`), resolve modules through `love.filesystem` instead of `package.path`:
 
 ```lua
-package.path = package.path .. ";lib/isolet2d/?.lua"
+local ISOLET_DIR = "libraries/isolet2d/"
+
+local function isolet_loader(name)
+    local path = ISOLET_DIR .. name .. ".lua"
+    if love.filesystem.getInfo(path) then
+        local chunk, err = load(love.filesystem.read(path), "@" .. path)
+        if not chunk then
+            error(err)
+        end
+        return chunk
+    end
+end
+
+table.insert(package.loaders, 2, isolet_loader)
+
 local Iso = require("isolet2d")
 ```
 
-Internal modules use flat names (`stack`, `terrain`, …) and must live on the same path.
+Run this once before `require("isolet2d")` (typically at the top of `main.lua`). Set `ISOLET_DIR` to your copy of the library.
+
+Internal modules use flat names (`stack`, `terrain`, …) and must live in the same directory as `isolet2d.lua`. The loader above resolves both the facade and those submodules.
 
 ---
 
 ## Facade (`isolet2d.lua`)
 
-### `Iso.init(raw)`
+### `Iso.init(raw?)`
 
 Build config from `raw`, load terrain/structure/NPC assets. Call once before any map work.
+
+`raw` may be omitted or `{}` — missing fields fall back to library defaults (`design_width` 1280, `design_height` 720, `tile_size` 64, iso ratios `0.5` / `0.25` / `0.5`, empty `terrain_mats` / `structures` / `npcs` / `projectiles` tables).
 
 Must be called before `load_map`, `create_map`, or `layout_for`.
 
@@ -192,6 +212,33 @@ Submodule for panning in design space (see [Camera](#camera-module)).
 
 ## Configuration (`Iso.init`)
 
+Minimal `iso_cfg` using solid-color terrain (no image assets required):
+
+```lua
+local iso_cfg = {
+    design_width = 1280,
+    design_height = 720,
+    grid_origin_x = 0,
+    grid_origin_y = 0,
+    map_offset_y = 120,
+    tile_size = 64,
+    iso_x_ratio = 0.5,
+    iso_y_ratio = 0.25,
+    iso_eh_ratio = 0.5,
+    grid_point_per_tile = 2,
+    terrain_mats = {
+        grass = { color = { 0.35, 0.72, 0.28 }, walkable = true },
+        dirt  = { color = { 0.55, 0.38, 0.22 }, walkable = true },
+        water = { color = { 0.2, 0.45, 0.85 }, walkable = false, alpha = 0.85 },
+    },
+    structures = {},
+    npcs = {},
+    projectiles = {
+        bolt = { move = "line", duration = 0.4, radius = 5, color = { 1, 0.85, 0.3 } },
+    },
+}
+```
+
 | Field                 | Type     | Description                                     |
 | --------------------- | -------- | ----------------------------------------------- |
 | `design_width`        | number   | Design resolution width (viewport + camera)     |
@@ -306,21 +353,37 @@ Default kind when omitted on spawn events: `"bolt"`.
 
 `Stack.height(src, row, col)` (internal) counts non-empty layers in a cell.
 
-Example:
+Each row in `stacks` is one map row (depth); each string is one tile column. Characters map through `stack_chars` to ids in `terrain_mats`. Layer 0 is the bottom character, layer 1 the next, and so on; `"."` marks an empty slot in the stack.
+
+Example (pairs with the minimal `iso_cfg` above):
 
 ```lua
 local map_src = {
     stacks = {
-        { "g.", "gg", "g.." },
-        { ".g", "ggg", "g" },
+        { "gd", "gg", "gd" },
+        { "gg", "gw", "gg" },
+        { "gd", "gg", "gd" },
     },
     stack_chars = {
         g = "grass",
+        d = "dirt",
+        w = "water",
         ["."] = "air",
     },
-    background = { R = 0.15, G = 0.2, B = 0.25 },
+    background = { R = 0.12, G = 0.16, B = 0.22 },
 }
 ```
+
+After `Iso.load_map(map_src)`, spawn entities with events rather than embedding them in the map source:
+
+```lua
+Iso.run({
+    { type = "npc.add", id = "hero", kind = "player", tile_x = 1, tile_y = 1 },
+    { type = "structure.add", kind = "tree", id = "t1", tile_x = 0, tile_y = 2 },
+})
+```
+
+Kinds must exist in `iso_cfg.npcs` / `iso_cfg.structures`. See [bullet2d](https://github.com/huakraparueee/bullet2d) for sprite-backed catalogs.
 
 ---
 

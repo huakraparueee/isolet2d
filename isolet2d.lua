@@ -34,6 +34,7 @@ local function active_map()
 end
 
 function M.init(raw)
+    raw = raw or {}
     Setup.set(Setup.build(raw))
     Terrain.load()
     Npc.load()
