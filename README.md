@@ -14,13 +14,11 @@ A **LÖVE 11.x** library for stacked isometric maps — terrain cubes, structure
 Register a custom loader so `require` resolves through `love.filesystem` (works in fused `.exe` builds; `package.path` alone often does not):
 
 ```lua
-love.filesystem.setRequirePath(
-    love.filesystem.getRequirePath() .. ";libraries/isolet2d/?.lua"
-)
-
-local Iso = require("isolet2d")
+local IsoLoader = require("libraries.isolet2d.loader")
+IsoLoader.registerModules("libraries/isolet2d")
 
 function love.load()
+    Iso = require("libraries.isolet2d.isolet2d")
     Iso.init({
         terrain_mats = {
             grass = { color = { 0.35, 0.72, 0.28 }, walkable = true },

@@ -10,26 +10,6 @@ LÖVE 11.x library for stacked isometric maps (terrain, structures, NPCs).
 
 ---
 
-## Install
-
-Copy all `.lua` files into your game (e.g. `libraries/isolet2d/`).
-
-For fused LÖVE builds (`.exe`, `.app`), resolve modules through `love.filesystem` instead of `package.path`:
-
-```lua
-love.filesystem.setRequirePath(
-    love.filesystem.getRequirePath() .. ";libraries/isolet2d/?.lua"
-)
-
-local Iso = require("isolet2d")
-```
-
-Run this once before `require("isolet2d")` (typically at the top of `main.lua`).
-
-Internal modules use flat names (`stack`, `terrain`, …) and must live in the same directory as `isolet2d.lua`. The loader above resolves both the facade and those submodules.
-
----
-
 ## Facade (`isolet2d.lua`)
 
 ### `Iso.init(raw?)`
@@ -197,10 +177,10 @@ Can also set `debug_draw_map = true` in the init config.
 
 Draw overlays on top of the current top terrain surface for specific tiles.
 
-| Function                             | Description                                    |
-| ------------------------------------ | ---------------------------------------------- |
-| `Iso.set_tile_highlights(highlights)` | Set tile highlight list (array)             |
-| `Iso.clear_tile_highlights()`       | Clear highlight overlays                        |
+| Function                              | Description                     |
+| ------------------------------------- | ------------------------------- |
+| `Iso.set_tile_highlights(highlights)` | Set tile highlight list (array) |
+| `Iso.clear_tile_highlights()`         | Clear highlight overlays        |
 
 `highlights` is an array of tables:
 
