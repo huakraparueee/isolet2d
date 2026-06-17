@@ -17,9 +17,16 @@ local NEIGHBORS = {
     { 1, 1 },
 }
 
-local function key(ix, iy)
-    return ix .. "," .. iy
-end
+local MAX_BFS_EXPAND = 200
+local MAX_GREEDY_STEPS = 48
+
+local pool = {
+    visited = {},
+    came_from = {},
+    queue = {},
+    visit_keys = {},
+    visit_n = 0,
+}
 
 local function grid(map)
     if not map or not map.grid then
@@ -27,6 +34,33 @@ local function grid(map)
     end
 
     return map.grid
+end
+
+local function cell_key(ix, iy)
+    return ix * 4096 + iy
+end
+
+local function pool_reset()
+    local keys = pool.visit_keys
+    local n = pool.visit_n
+
+    for i = 1, n do
+        local k = keys[i]
+        pool.visited[k] = nil
+        pool.came_from[k] = nil
+    end
+
+    pool.visit_n = 0
+end
+
+local function pool_mark(ix, iy)
+    local k = cell_key(ix, iy)
+    local n = pool.visit_n + 1
+
+    pool.visit_n = n
+    pool.visit_keys[n] = k
+
+    return k
 end
 
 function Path.surface_z(map, tile_x, tile_y)
@@ -137,6 +171,157 @@ function Path.try_step_neighbor(map, from_px, from_py, cell_dx, cell_dy)
     return Placement.cell_node(map, to_ix, to_iy)
 end
 
+local function dist_sq(ax, ay, bx, by)
+    local dx = ax - bx
+    local dy = ay - by
+
+    return dx * dx + dy * dy
+end
+
+function Path.greedy_path_pos(map, from_px, from_py, to_px, to_py, max_steps)
+    max_steps = max_steps or MAX_GREEDY_STEPS
+
+    local to_ix, to_iy = Placement.cell_ix(to_px, to_py)
+    local px, py = from_px, from_py
+    local path = {}
+
+    for _ = 1, max_steps do
+        local ix, iy = Placement.cell_ix(px, py)
+
+        if ix == to_ix and iy == to_iy then
+            return path
+        end
+
+        local best_node
+        local best_d = math.huge
+
+        for i = 1, #NEIGHBORS do
+            local off = NEIGHBORS[i]
+            local node = Path.try_step_neighbor(map, px, py, off[1], off[2])
+
+            if node then
+                local d = dist_sq(node.px, node.py, to_px, to_py)
+
+                if d < best_d then
+                    best_d = d
+                    best_node = node
+                end
+            end
+        end
+
+        if not best_node then
+            break
+        end
+
+        path[#path + 1] = {
+            x = best_node.px,
+            y = best_node.py,
+            z = best_node.z,
+        }
+        px, py = best_node.px, best_node.py
+    end
+
+    if #path == 0 then
+        return nil
+    end
+
+    local last = path[#path]
+    local goal_ix, goal_iy = Placement.cell_ix(to_px, to_py)
+    local last_ix, last_iy = Placement.cell_ix(last.x, last.y)
+
+    if last_ix == goal_ix and last_iy == goal_iy then
+        return path
+    end
+
+    return nil
+end
+
+local function rebuild_path(map, came_from, to_ix, to_iy)
+    local path = {}
+    local ix, iy = to_ix, to_iy
+
+    while came_from[cell_key(ix, iy)] do
+        local node = Placement.cell_node(map, ix, iy)
+
+        if node then
+            path[#path + 1] = {
+                x = node.px,
+                y = node.py,
+                z = node.z,
+            }
+        end
+
+        local prev = came_from[cell_key(ix, iy)]
+        ix, iy = prev[1], prev[2]
+    end
+
+    local reversed = {}
+    local n = #path
+
+    for i = 1, n do
+        reversed[i] = path[n - i + 1]
+    end
+
+    return reversed
+end
+
+local function find_path_bfs(map, from_ix, from_iy, to_ix, to_iy)
+    pool_reset()
+
+    local visited = pool.visited
+    local came_from = pool.came_from
+    local queue = pool.queue
+
+    local start_k = pool_mark(from_ix, from_iy)
+    visited[start_k] = true
+
+    local head = 1
+    local tail = 1
+    queue[1] = from_ix
+    queue[2] = from_iy
+
+    local expanded = 0
+
+    while head <= tail do
+        local cx = queue[head]
+        local cy = queue[head + 1]
+        head = head + 2
+
+        if cx == to_ix and cy == to_iy then
+            return rebuild_path(map, came_from, to_ix, to_iy)
+        end
+
+        expanded = expanded + 1
+
+        if expanded > MAX_BFS_EXPAND then
+            return nil
+        end
+
+        for i = 1, #NEIGHBORS do
+            local off = NEIGHBORS[i]
+            local nx = cx + off[1]
+            local ny = cy + off[2]
+
+            if cell_in_bounds(map, nx, ny) then
+                local nk = cell_key(nx, ny)
+
+                if not visited[nk] and Path.can_edge(map, cx, cy, nx, ny, false) then
+                    visited[nk] = true
+                    came_from[nk] = { cx, cy }
+                    pool_mark(nx, ny)
+
+                    tail = tail + 1
+                    queue[tail] = nx
+                    tail = tail + 1
+                    queue[tail] = ny
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 function Path.pick_reachable_near(map, px, py, radius)
     local from_node = Placement.node_at_pos(map, px, py)
 
@@ -146,15 +331,23 @@ function Path.pick_reachable_near(map, px, py, radius)
 
     radius = radius or 1
     local candidates = {}
-    local visited = {}
-    local queue = { { from_node.ix, from_node.iy } }
+    pool_reset()
 
-    visited[key(from_node.ix, from_node.iy)] = true
+    local visited = pool.visited
+    local queue = pool.queue
+
+    local start_k = pool_mark(from_node.ix, from_node.iy)
+    visited[start_k] = true
+
     local head = 1
+    local tail = 1
+    queue[1] = from_node.ix
+    queue[2] = from_node.iy
 
-    while head <= #queue do
-        local cx, cy = queue[head][1], queue[head][2]
-        head = head + 1
+    while head <= tail do
+        local cx = queue[head]
+        local cy = queue[head + 1]
+        head = head + 2
         local node = Placement.cell_node(map, cx, cy)
 
         if node
@@ -165,9 +358,11 @@ function Path.pick_reachable_near(map, px, py, radius)
             candidates[#candidates + 1] = node
         end
 
-        for _, off in ipairs(NEIGHBORS) do
-            local nx, ny = cx + off[1], cy + off[2]
-            local nk = key(nx, ny)
+        for i = 1, #NEIGHBORS do
+            local off = NEIGHBORS[i]
+            local nx = cx + off[1]
+            local ny = cy + off[2]
+            local nk = cell_key(nx, ny)
 
             if not visited[nk]
                 and cell_in_bounds(map, nx, ny)
@@ -180,7 +375,12 @@ function Path.pick_reachable_near(map, px, py, radius)
                     and math.abs(next_node.py - py) <= radius + 1
                 then
                     visited[nk] = true
-                    queue[#queue + 1] = { nx, ny }
+                    pool_mark(nx, ny)
+
+                    tail = tail + 1
+                    queue[tail] = nx
+                    tail = tail + 1
+                    queue[tail] = ny
                 end
             end
         end
@@ -207,60 +407,27 @@ function Path.find_path_pos(map, from_px, from_py, to_px, to_py)
         return nil
     end
 
-    local visited = {}
-    local came_from = {}
-    local queue = { { from_ix, from_iy } }
+    if Path.can_step_pos(map, from_px, from_py, to_px, to_py) then
+        local node = Placement.node_at_pos(map, to_px, to_py)
 
-    visited[key(from_ix, from_iy)] = true
-    local head = 1
-
-    while head <= #queue do
-        local cx, cy = queue[head][1], queue[head][2]
-        head = head + 1
-
-        if cx == to_ix and cy == to_iy then
-            local path = {}
-            local ix, iy = to_ix, to_iy
-
-            while came_from[key(ix, iy)] do
-                local node = Placement.cell_node(map, ix, iy)
-
-                if node then
-                    path[#path + 1] = {
-                        x = node.px,
-                        y = node.py,
-                        z = node.z,
-                    }
-                end
-                local prev = came_from[key(ix, iy)]
-                ix, iy = prev[1], prev[2]
-            end
-
-            local reversed = {}
-
-            for i = #path, 1, -1 do
-                reversed[#reversed + 1] = path[i]
-            end
-
-            return reversed
-        end
-
-        for _, off in ipairs(NEIGHBORS) do
-            local nx, ny = cx + off[1], cy + off[2]
-
-            if cell_in_bounds(map, nx, ny) then
-                local nk = key(nx, ny)
-
-                if not visited[nk] and Path.can_edge(map, cx, cy, nx, ny, false) then
-                    visited[nk] = true
-                    came_from[nk] = { cx, cy }
-                    queue[#queue + 1] = { nx, ny }
-                end
-            end
+        if node then
+            return {
+                {
+                    x = node.px,
+                    y = node.py,
+                    z = node.z,
+                },
+            }
         end
     end
 
-    return nil
+    local greedy = Path.greedy_path_pos(map, from_px, from_py, to_px, to_py)
+
+    if greedy then
+        return greedy
+    end
+
+    return find_path_bfs(map, from_ix, from_iy, to_ix, to_iy)
 end
 
 return Path

@@ -586,12 +586,9 @@ local function is_walking(state)
     return state.path ~= nil
 end
 
-local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
-    state.mode_busy = false
-    state.mode_left = nil
-    state.after_mode = nil
-    clear_walk(state)
+local REPATH_GOAL_EPS_SQ = 2.25
 
+local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
     local w = piece.tiles_w or 1
     local d = piece.tiles_d or 1
     local goal_node = Placement.node_at_pos(map, goal_x, goal_y)
@@ -600,6 +597,24 @@ local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
         goal_x = goal_node.px
         goal_y = goal_node.py
     end
+
+    if state.path then
+        local last = state.path[#state.path]
+
+        if last then
+            local dx = goal_x - last.x
+            local dy = goal_y - last.y
+
+            if dx * dx + dy * dy <= REPATH_GOAL_EPS_SQ then
+                return true
+            end
+        end
+    end
+
+    state.mode_busy = false
+    state.mode_left = nil
+    state.after_mode = nil
+    clear_walk(state)
 
     local path = Path.find_path_pos(map, piece.pos_x, piece.pos_y, goal_x, goal_y)
 
@@ -723,17 +738,58 @@ local function want_id(npc_id, filter)
     return false
 end
 
-local Npc = {}
-
-function Npc.find_by_id(map, id)
-    if not map.pieces or not id then
+local function npc_piece_for_id(map, id)
+    if not id then
         return nil
     end
 
-    for _, piece in ipairs(map.pieces) do
-        if piece.npc_id == id then
-            return piece
+    local piece = map.npc_by_id and map.npc_by_id[id]
+
+    if piece and not piece._removed then
+        return piece
+    end
+
+    return nil
+end
+
+local function each_npc_for_filter(map, id_filter, fn)
+    if type(id_filter) == "string" then
+        local piece = npc_piece_for_id(map, id_filter)
+
+        if piece and piece.npc then
+            fn(piece)
         end
+
+        return
+    end
+
+    for _, piece in ipairs(map.npc_pieces or {}) do
+        if piece.npc and want_id(piece.npc_id, id_filter) then
+            fn(piece)
+        end
+    end
+end
+
+local Npc = {}
+
+local function track_npc_id(map, piece)
+    if not piece or not piece.npc_id then
+        return
+    end
+
+    map.npc_by_id = map.npc_by_id or {}
+    map.npc_by_id[piece.npc_id] = piece
+end
+
+function Npc.find_by_id(map, id)
+    if not id then
+        return nil
+    end
+
+    local piece = map.npc_by_id and map.npc_by_id[id]
+
+    if piece and not piece._removed then
+        return piece
     end
 
     return nil
@@ -971,28 +1027,23 @@ function Npc.place(map, ev)
     map.pieces[#map.pieces + 1] = piece
     map.npc_pieces = map.npc_pieces or {}
     map.npc_pieces[#map.npc_pieces + 1] = piece
+    track_npc_id(map, piece)
     Npc.add(map, piece, ev)
 
     return piece
 end
 
 function Npc.retire(map, id_filter)
-    if not map.pieces then
-        return
-    end
+    each_npc_for_filter(map, id_filter, function(piece)
+        Npc.clear_piece_walk(piece)
 
-    for _, piece in ipairs(map.pieces) do
-        if piece.npc and want_id(piece.npc_id, id_filter) then
-            Npc.clear_piece_walk(piece)
-
-            if piece.npc.mode ~= "stand" or piece.npc.mode_busy then
-                set_mode(piece.npc, "stand")
-            end
-
-            piece.alpha = 0
-            piece._pooled = true
+        if piece.npc.mode ~= "stand" or piece.npc.mode_busy then
+            set_mode(piece.npc, "stand")
         end
-    end
+
+        piece.alpha = 0
+        piece._pooled = true
+    end)
 end
 
 function Npc.is_active(piece)
@@ -1003,64 +1054,44 @@ function Npc.is_active(piece)
 end
 
 function Npc.set_mode(map, mode, id_filter, play_opts)
-    if not map.pieces then
-        return
-    end
-
-    for _, piece in ipairs(map.pieces) do
-        if piece.npc and want_id(piece.npc_id, id_filter) then
-            set_mode(piece.npc, mode, play_opts)
-        end
-    end
+    each_npc_for_filter(map, id_filter, function(piece)
+        set_mode(piece.npc, mode, play_opts)
+    end)
 end
 
 function Npc.walk_to(map, tile_x, tile_y, id_filter, tile_z)
-    if not map.pieces then
-        return
-    end
+    each_npc_for_filter(map, id_filter, function(piece)
+        local w = piece.tiles_w or 1
+        local d = piece.tiles_d or 1
+        local node = Placement.node_for_footprint(map, tile_x, tile_y, w, d)
 
-    for _, piece in ipairs(map.pieces) do
-        if piece.npc
-            and want_id(piece.npc_id, id_filter)
-        then
-            local w = piece.tiles_w or 1
-            local d = piece.tiles_d or 1
-            local node = Placement.node_for_footprint(map, tile_x, tile_y, w, d)
-
-            if node then
-                walk_state_to_pos(
-                    piece.npc,
-                    piece,
-                    map,
-                    node.px,
-                    node.py,
-                    tile_z or node.z
-                )
-            end
+        if node then
+            walk_state_to_pos(
+                piece.npc,
+                piece,
+                map,
+                node.px,
+                node.py,
+                tile_z or node.z
+            )
         end
-    end
+    end)
 end
 
 function Npc.walk_to_pos(map, pos_x, pos_y, id_filter, tile_z)
-    if not map.pieces then
-        return
-    end
-
-    for _, piece in ipairs(map.pieces) do
-        if piece.npc
-            and want_id(piece.npc_id, id_filter)
-        then
-            walk_state_to_pos(piece.npc, piece, map, pos_x, pos_y, tile_z)
-        end
-    end
+    each_npc_for_filter(map, id_filter, function(piece)
+        walk_state_to_pos(piece.npc, piece, map, pos_x, pos_y, tile_z)
+    end)
 end
 
 function Npc.is_anim_busy(map, id_filter)
-    if not map.pieces then
-        return false
+    if type(id_filter) == "string" then
+        local piece = npc_piece_for_id(map, id_filter)
+
+        return piece and piece.npc and piece.npc.mode_busy or false
     end
 
-    for _, piece in ipairs(map.pieces) do
+    for _, piece in ipairs(map.npc_pieces or {}) do
         if piece.npc
             and want_id(piece.npc_id, id_filter)
             and piece.npc.mode_busy
@@ -1073,11 +1104,7 @@ function Npc.is_anim_busy(map, id_filter)
 end
 
 function Npc.is_busy(map)
-    if not map.pieces then
-        return false
-    end
-
-    for _, piece in ipairs(map.pieces) do
+    for _, piece in ipairs(map.npc_pieces or {}) do
         if piece.npc then
             if is_walking(piece.npc) or piece.npc.mode_busy then
                 return true

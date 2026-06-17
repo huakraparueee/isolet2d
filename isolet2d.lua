@@ -204,14 +204,20 @@ end
 
 local function sync_npc_pieces(map)
     local list = {}
+    local by_id = {}
 
     for _, piece in ipairs(map.pieces or {}) do
         if piece.npc and not piece._removed then
             list[#list + 1] = piece
+
+            if piece.npc_id then
+                by_id[piece.npc_id] = piece
+            end
         end
     end
 
     map.npc_pieces = list
+    map.npc_by_id = by_id
 end
 
 function M.bind_grid(map, src)
@@ -1173,30 +1179,108 @@ local function is_live_terrain_piece(piece)
         and not piece.baked
 end
 
-local function terrain_draw_max_z(map, source, cache)
+local function collect_terrain_draw_entries(map, source, cache, view_rect)
+    local by_z = {}
     local max_z = map.terrain_bake_max_z or 0
 
     for _, piece in ipairs(map.pieces or {}) do
-        if is_live_terrain_piece(piece) then
-            max_z = math.max(max_z, piece.tile_z or 0)
+        if is_live_terrain_piece(piece) and piece_in_view(piece, view_rect) then
+            local tile_z = piece.tile_z or 0
+            local sum, tx, ty = piece_sort_key(piece, source, cache)
+            local list = by_z[tile_z]
+
+            if not list then
+                list = {}
+                by_z[tile_z] = list
+            end
+
+            if tile_z > max_z then
+                max_z = tile_z
+            end
+
+            local entry = entry_take()
+            entry.type = "terrain_piece"
+            entry.chunk = nil
+            entry.piece = piece
+            entry.sum = sum
+            entry.tx = tx
+            entry.ty = ty
+            entry.sort_layer = 1
+            list[#list + 1] = entry
         end
     end
+
+    return by_z, max_z
+end
+
+local function collect_structure_draw_entries(map, source, cache, view_rect)
+    local by_z = {}
+    local max_z = 0
 
     for _, piece in ipairs(map.structure_pieces or {}) do
-        local _, tx, ty = piece_sort_key(piece, source, cache)
-        local base_z = Tile.top_z_from_cache(source, cache, tx, ty)
-        max_z = math.max(max_z, base_z + structure_tiles_h(piece) - 1)
-    end
+        if piece_in_view(piece, view_rect) then
+            local sum, tx, ty = piece_sort_key(piece, source, cache)
+            local struct_base_z = Tile.top_z_from_cache(source, cache, tx, ty)
+            local struct_top_z = struct_base_z + structure_tiles_h(piece) - 1
+            local list = by_z[struct_top_z]
 
-    for _, piece in ipairs(map.npc_pieces or {}) do
-        if piece.npc then
-            local _, tx, ty = piece_sort_key(piece, source, cache)
-            local base_z = Tile.top_z_from_cache(source, cache, tx, ty)
-            max_z = math.max(max_z, base_z + npc_tiles_h(piece) - 1)
+            if not list then
+                list = {}
+                by_z[struct_top_z] = list
+            end
+
+            if struct_top_z > max_z then
+                max_z = struct_top_z
+            end
+
+            local entry = entry_take()
+            entry.type = "structure"
+            entry.chunk = nil
+            entry.piece = piece
+            entry.sum = sum
+            entry.tx = tx
+            entry.ty = ty
+            entry.sort_layer = 2
+            list[#list + 1] = entry
         end
     end
 
-    return max_z
+    return by_z, max_z
+end
+
+local function collect_npc_draw_entries(map, source, cache, view_rect)
+    local by_z = {}
+    local max_z = 0
+
+    for _, piece in ipairs(map.npc_pieces or {}) do
+        if Npc.is_active(piece) and piece_in_view(piece, view_rect) then
+            local sum, tx, ty = piece_sort_key(piece, source, cache)
+            local npc_base_z = Tile.top_z_from_cache(source, cache, tx, ty)
+            local npc_top_z = npc_base_z + npc_tiles_h(piece) - 1
+            local list = by_z[npc_top_z]
+
+            if not list then
+                list = {}
+                by_z[npc_top_z] = list
+            end
+
+            if npc_top_z > max_z then
+                max_z = npc_top_z
+            end
+
+            local entry = entry_take()
+            entry.type = "npc"
+            entry.chunk = nil
+            entry.piece = piece
+            entry.sum = sum
+            entry.tx = tx
+            entry.ty = ty
+            entry.sort_layer = 3
+            list[#list + 1] = entry
+        end
+    end
+
+    return by_z, max_z
 end
 
 local function draw_placement_debug(map, lg, layout, view_rect)
@@ -1390,7 +1474,6 @@ function M.draw_map()
     local view_rect = tile_rect_for_viewport(layout, vp, CULL_PAD_TILES)
     local cache_rect = tile_rect_for_viewport(layout, vp, CULL_PAD_TILES + CULL_CACHE_PAD_TILES)
     local cache = terrain_render_cache(current_map, cache_rect)
-    local max_z = terrain_draw_max_z(current_map, source, cache)
 
     if source.background then
         lg.clear(
@@ -1406,25 +1489,29 @@ function M.draw_map()
     entry_pool_reset()
     local buckets = {}
     local min_sum, max_sum = math.huge, -math.huge
+    local terrain_entries, terrain_max = collect_terrain_draw_entries(
+        current_map,
+        source,
+        cache,
+        view_rect
+    )
+    local structure_entries, struct_max = collect_structure_draw_entries(
+        current_map,
+        source,
+        cache,
+        view_rect
+    )
+    local npc_entries, npc_max = collect_npc_draw_entries(
+        current_map,
+        source,
+        cache,
+        view_rect
+    )
+    local max_z = math.max(terrain_max, struct_max, npc_max)
 
     for tile_z = 0, max_z do
-        for _, piece in ipairs(current_map.pieces or {}) do
-            if (piece.tile_z or 0) == tile_z
-                and piece_in_view(piece, view_rect)
-                and is_live_terrain_piece(piece)
-            then
-                local sum, tx, ty = piece_sort_key(piece, source, cache)
-
-                local entry = entry_take()
-                entry.type = "terrain_piece"
-                entry.chunk = nil
-                entry.piece = piece
-                entry.sum = sum
-                entry.tx = tx
-                entry.ty = ty
-                entry.sort_layer = 1
-                min_sum, max_sum = sum_bucket_insert(buckets, min_sum, max_sum, entry)
-            end
+        for _, entry in ipairs(terrain_entries[tile_z] or {}) do
+            min_sum, max_sum = sum_bucket_insert(buckets, min_sum, max_sum, entry)
         end
 
         min_sum, max_sum = insert_tile_highlight_entries(
@@ -1437,44 +1524,12 @@ function M.draw_map()
             tile_z
         )
 
-        for _, piece in ipairs(current_map.structure_pieces or {}) do
-            if piece_in_view(piece, view_rect) then
-                local sum, tx, ty = piece_sort_key(piece, source, cache)
-                local struct_base_z = Tile.top_z_from_cache(source, cache, tx, ty)
-                local struct_top_z = struct_base_z + structure_tiles_h(piece) - 1
-
-                if struct_top_z == tile_z then
-                    local entry = entry_take()
-                    entry.type = "structure"
-                    entry.chunk = nil
-                    entry.piece = piece
-                    entry.sum = sum
-                    entry.tx = tx
-                    entry.ty = ty
-                    entry.sort_layer = 2
-                    min_sum, max_sum = sum_bucket_insert(buckets, min_sum, max_sum, entry)
-                end
-            end
+        for _, entry in ipairs(structure_entries[tile_z] or {}) do
+            min_sum, max_sum = sum_bucket_insert(buckets, min_sum, max_sum, entry)
         end
 
-        for _, piece in ipairs(current_map.npc_pieces or {}) do
-            if Npc.is_active(piece) and piece_in_view(piece, view_rect) then
-                local sum, tx, ty = piece_sort_key(piece, source, cache)
-                local npc_base_z = Tile.top_z_from_cache(source, cache, tx, ty)
-                local npc_top_z = npc_base_z + npc_tiles_h(piece) - 1
-
-                if npc_top_z == tile_z then
-                    local entry = entry_take()
-                    entry.type = "npc"
-                    entry.chunk = nil
-                    entry.piece = piece
-                    entry.sum = sum
-                    entry.tx = tx
-                    entry.ty = ty
-                    entry.sort_layer = 3
-                    min_sum, max_sum = sum_bucket_insert(buckets, min_sum, max_sum, entry)
-                end
-            end
+        for _, entry in ipairs(npc_entries[tile_z] or {}) do
+            min_sum, max_sum = sum_bucket_insert(buckets, min_sum, max_sum, entry)
         end
     end
 

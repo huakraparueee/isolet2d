@@ -101,6 +101,8 @@ local function npc_add(map, ev)
     map.pieces[#map.pieces + 1] = piece
     map.npc_pieces = map.npc_pieces or {}
     map.npc_pieces[#map.npc_pieces + 1] = piece
+    map.npc_by_id = map.npc_by_id or {}
+    map.npc_by_id[ev.id] = piece
     queue_op(map, { type = "npc.add", piece = piece, ev = ev })
 end
 
