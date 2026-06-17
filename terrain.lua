@@ -1,4 +1,4 @@
-﻿--[[
+--[[
   Pipeline step 2 — terrain pieces on tile_x, tile_y (draw + height/walkable cache).
 ]]
 

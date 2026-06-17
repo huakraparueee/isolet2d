@@ -1,4 +1,4 @@
-﻿local anim8 = require("anim8")
+local anim8 = require("anim8")
 local Setup = require("setup")
 local Path = require("path")
 local Placement = require("placement")
@@ -845,6 +845,36 @@ function Npc.change_kind(map, piece, kind, opts)
     return true
 end
 
+local function place_piece_at(map, piece, ev, label)
+    if ev.pos_x ~= nil and ev.pos_y ~= nil then
+        local node = Placement.node_at_pos(map, ev.pos_x, ev.pos_y)
+
+        if not node then
+            error(
+                label
+                    .. ": no placement node at "
+                    .. tostring(ev.pos_x)
+                    .. ","
+                    .. tostring(ev.pos_y)
+            )
+        end
+
+        Placement.apply_node(piece, node)
+
+        return
+    end
+
+    if not Placement.spawn_at(map, piece, ev.tile_x, ev.tile_y) then
+        error(
+            label
+                .. ": no placement node at "
+                .. tostring(ev.tile_x)
+                .. ","
+                .. tostring(ev.tile_y)
+        )
+    end
+end
+
 function Npc.add(map, piece, ev)
     Npc.sync_footprint(map, piece, ev.kind, ev)
 
@@ -860,14 +890,7 @@ function Npc.add(map, piece, ev)
     })
 
     -- pipeline step 5: npc feet on placement node
-    if not Placement.spawn_at(map, piece, ev.tile_x, ev.tile_y) then
-        error(
-            "npc.add: no placement node at "
-                .. tostring(ev.tile_x)
-                .. ","
-                .. tostring(ev.tile_y)
-        )
-    end
+    place_piece_at(map, piece, ev, "npc.add")
 
     piece.alpha = ev.alpha or 1
     piece._pooled = false
@@ -913,14 +936,7 @@ function Npc.activate(map, piece, ev)
         set_mode(piece.npc, ev.mode or "stand", play_opts)
     end
 
-    if not Placement.spawn_at(map, piece, ev.tile_x, ev.tile_y) then
-        error(
-            "npc.place: no placement node at "
-                .. tostring(ev.tile_x)
-                .. ","
-                .. tostring(ev.tile_y)
-        )
-    end
+    place_piece_at(map, piece, ev, "npc.place")
 
     piece.alpha = ev.alpha or 1
     piece._pooled = false

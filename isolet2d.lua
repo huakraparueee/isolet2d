@@ -1673,14 +1673,16 @@ function M.update(dt)
 end
 
 function M.tick(dt)
-    local map = active_map()
+    if not current_map then
+        return
+    end
 
     M.update(dt)
-    Projectile.update(map, dt)
+    Projectile.update(current_map, dt)
     flush_pending_ops()
     Terrain.update(dt)
-    Structure.update(map, dt)
-    Npc.update(map, dt)
+    Structure.update(current_map, dt)
+    Npc.update(current_map, dt)
 end
 
 return M
