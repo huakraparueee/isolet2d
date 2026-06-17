@@ -14,20 +14,9 @@ A **LÖVE 11.x** library for stacked isometric maps — terrain cubes, structure
 Register a custom loader so `require` resolves through `love.filesystem` (works in fused `.exe` builds; `package.path` alone often does not):
 
 ```lua
-local ISOLET_DIR = "libraries/isolet2d/"
-
-local function isolet_loader(name)
-    local path = ISOLET_DIR .. name .. ".lua"
-    if love.filesystem.getInfo(path) then
-        local chunk, err = load(love.filesystem.read(path), "@" .. path)
-        if not chunk then
-            error(err)
-        end
-        return chunk
-    end
-end
-
-table.insert(package.loaders, 2, isolet_loader)
+love.filesystem.setRequirePath(
+    love.filesystem.getRequirePath() .. ";libraries/isolet2d/?.lua"
+)
 
 local Iso = require("isolet2d")
 
@@ -64,7 +53,7 @@ function love.draw()
 end
 ```
 
-Run the loader setup once before any `require("isolet2d")` or internal isolet2d module load (e.g. top of `main.lua`). Set `ISOLET_DIR` to match where you copied the library inside your game project.
+Run the loader setup once before any `require("isolet2d")` or internal isolet2d module load (e.g. top of `main.lua`).
 
 `iso_cfg` holds global layout and asset definitions (`terrain_mats`, `structures`, `npcs`, `projectiles`). `map_src` is per-stage terrain: `stacks` rows map to depth (`tiles_d`), columns to width (`tiles_w`); each character in a cell is one layer from the bottom up. See [docs/api.md](docs/api.md) for every field. For sprites, NPC modes, and a full game wiring example, see [bullet2d](https://github.com/huakraparueee/bullet2d).
 
@@ -91,11 +80,11 @@ Good reference for wiring `Iso.init` / `load_map` / `tick` / `draw_map`, handlin
 - **Pause** — freeze NPC, structure, or projectile updates independently (`pause_npc`, `pause_structure`, `pause_projectile`)
 - **Camera** — design-space pan with bounds set from map geometry
 - **Debug overlay** — optional placement nodes, hit boxes, NPC anchors, and pick marker (`debug_draw_map`)
+- **Tile highlights** — set/clear top-surface or corner overlays for specific tiles
 
 ## Install
 
 1. Copy all `.lua` files from this repo into your game (e.g. `libraries/isolet2d/`).
-2. Register the `isolet_loader` from the quick start (set `ISOLET_DIR` to that folder).
 
 Internal modules (`stack`, `terrain`, …) use flat `require` names and must stay in the same directory as `isolet2d.lua`.
 

@@ -224,6 +224,101 @@ function Tile.feet_screen_from_piece(layout, piece, tiles_w, tiles_d, z_at)
     })
 end
 
+function Tile.draw_top_face(lg, layout, tile_x, tile_y, tile_z, r, g, b, a)
+    local s = layout.tile_size * (layout.scale or 1)
+    local cx, cy = Tile.to_screen(layout, tile_x, tile_y, tile_z or 0)
+    local hw = Tile.hw_for_tile_span(s, layout.iso_x_ratio)
+    local hd = Tile.hd_for_tile_span(s, layout.iso_y_ratio)
+    local eh = Tile.eh_for_tile_span(s, layout.iso_eh_ratio)
+    local yt = cy - eh
+
+    cx = Tile.snap_px(cx)
+
+    lg.setColor(r, g, b, a)
+    lg.polygon(
+        "fill",
+        cx,
+        Tile.snap_px(yt - hd),
+        Tile.snap_px(cx + hw),
+        yt,
+        cx,
+        Tile.snap_px(yt + hd),
+        Tile.snap_px(cx - hw),
+        yt
+    )
+
+    lg.setColor(r * 0.55, g * 0.55, b * 0.55, math.min(1, a + 0.2))
+    lg.setLineWidth(2)
+    lg.polygon(
+        "line",
+        cx,
+        Tile.snap_px(yt - hd),
+        Tile.snap_px(cx + hw),
+        yt,
+        cx,
+        Tile.snap_px(yt + hd),
+        Tile.snap_px(cx - hw),
+        yt
+    )
+    lg.setLineWidth(1)
+end
+
+function Tile.draw_corner_highlight(lg, layout, tile_x, tile_y, tile_z, r, g, b, a, opts)
+    opts = opts or {}
+    local inset = opts.inset or 0.16
+    local len = opts.len or 0.34
+    local s = layout.tile_size * (layout.scale or 1)
+    local cx, cy = Tile.to_screen(layout, tile_x, tile_y, tile_z or 0)
+    local hw = Tile.hw_for_tile_span(s, layout.iso_x_ratio)
+    local hd = Tile.hd_for_tile_span(s, layout.iso_y_ratio)
+    local eh = Tile.eh_for_tile_span(s, layout.iso_eh_ratio)
+    local yt = cy - eh
+
+    cx = Tile.snap_px(cx)
+
+    local function lerp(ax, ay, bx, by, t)
+        return ax + (bx - ax) * t, ay + (by - ay) * t
+    end
+
+    local function pull(vx, vy)
+        return lerp(vx, vy, cx, yt, inset)
+    end
+
+    local top_x, top_y = pull(cx, Tile.snap_px(yt - hd))
+    local right_x, right_y = pull(Tile.snap_px(cx + hw), yt)
+    local bottom_x, bottom_y = pull(cx, Tile.snap_px(yt + hd))
+    local left_x, left_y = pull(Tile.snap_px(cx - hw), yt)
+
+    local function arm(ax, ay, bx, by)
+        return lerp(ax, ay, bx, by, len)
+    end
+
+    lg.setColor(r, g, b, a)
+    lg.setLineWidth(opts.line_width or 2)
+
+    local t_rx, t_ry = arm(top_x, top_y, right_x, right_y)
+    local t_lx, t_ly = arm(top_x, top_y, left_x, left_y)
+    lg.line(top_x, top_y, t_rx, t_ry)
+    lg.line(top_x, top_y, t_lx, t_ly)
+
+    local r_tx, r_ty = arm(right_x, right_y, top_x, top_y)
+    local r_bx, r_by = arm(right_x, right_y, bottom_x, bottom_y)
+    lg.line(right_x, right_y, r_tx, r_ty)
+    lg.line(right_x, right_y, r_bx, r_by)
+
+    local b_rx, b_ry = arm(bottom_x, bottom_y, right_x, right_y)
+    local b_lx, b_ly = arm(bottom_x, bottom_y, left_x, left_y)
+    lg.line(bottom_x, bottom_y, b_rx, b_ry)
+    lg.line(bottom_x, bottom_y, b_lx, b_ly)
+
+    local l_tx, l_ty = arm(left_x, left_y, top_x, top_y)
+    local l_bx, l_by = arm(left_x, left_y, bottom_x, bottom_y)
+    lg.line(left_x, left_y, l_tx, l_ty)
+    lg.line(left_x, left_y, l_bx, l_by)
+
+    lg.setLineWidth(1)
+end
+
 function Tile.grid_index(source, tile_x, tile_y)
     local c = Setup.get()
     local lx = tile_x - c.grid_origin_x

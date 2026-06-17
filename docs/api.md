@@ -17,25 +17,14 @@ Copy all `.lua` files into your game (e.g. `libraries/isolet2d/`).
 For fused LÖVE builds (`.exe`, `.app`), resolve modules through `love.filesystem` instead of `package.path`:
 
 ```lua
-local ISOLET_DIR = "libraries/isolet2d/"
-
-local function isolet_loader(name)
-    local path = ISOLET_DIR .. name .. ".lua"
-    if love.filesystem.getInfo(path) then
-        local chunk, err = load(love.filesystem.read(path), "@" .. path)
-        if not chunk then
-            error(err)
-        end
-        return chunk
-    end
-end
-
-table.insert(package.loaders, 2, isolet_loader)
+love.filesystem.setRequirePath(
+    love.filesystem.getRequirePath() .. ";libraries/isolet2d/?.lua"
+)
 
 local Iso = require("isolet2d")
 ```
 
-Run this once before `require("isolet2d")` (typically at the top of `main.lua`). Set `ISOLET_DIR` to your copy of the library.
+Run this once before `require("isolet2d")` (typically at the top of `main.lua`).
 
 Internal modules use flat names (`stack`, `terrain`, …) and must live in the same directory as `isolet2d.lua`. The loader above resolves both the facade and those submodules.
 
@@ -133,31 +122,31 @@ Placement nodes expose `ix`, `iy`, `px`, `py`, `z`, `tile_x`, `tile_y`, `sx`, `s
 
 ### Coordinate helpers
 
-| Function                                   | Returns        | Description                                                        |
-| ------------------------------------------ | -------------- | ------------------------------------------------------------------ |
-| `Iso.placement_pos(ix, iy)`                | `px, py \| nil` | World position of a placement cell, or `nil` if missing             |
-| `Iso.placement_to_design(px, py, tile_z?)` | `x, y`         | Screen position in design space (includes current camera pan)      |
+| Function                                   | Returns         | Description                                                   |
+| ------------------------------------------ | --------------- | ------------------------------------------------------------- |
+| `Iso.placement_pos(ix, iy)`                | `px, py \| nil` | World position of a placement cell, or `nil` if missing       |
+| `Iso.placement_to_design(px, py, tile_z?)` | `x, y`          | Screen position in design space (includes current camera pan) |
 
 ### Picking (design space)
 
 Pass **design-space** coordinates (after your window→design transform, **before** camera pan — the functions subtract pan internally).
 
-| Function                                | Returns   | Description                                                                 |
-| --------------------------------------- | --------- | --------------------------------------------------------------------------- |
-| `Iso.query_at_design(design_x, design_y)` | `table \| nil` | Full hit query (see below)                                            |
-| `Iso.pick_at_design(design_x, design_y)`  | `table \| nil` | Tile under the cursor only (lighter)                                    |
-| `Iso.set_pick_marker(wx, wy)`             | —         | Set or clear (`nil`) the debug pick marker in map-local coordinates         |
+| Function                                  | Returns        | Description                                                         |
+| ----------------------------------------- | -------------- | ------------------------------------------------------------------- |
+| `Iso.query_at_design(design_x, design_y)` | `table \| nil` | Full hit query (see below)                                          |
+| `Iso.pick_at_design(design_x, design_y)`  | `table \| nil` | Tile under the cursor only (lighter)                                |
+| `Iso.set_pick_marker(wx, wy)`             | —              | Set or clear (`nil`) the debug pick marker in map-local coordinates |
 
 `query_at_design` return value (when not `nil`):
 
-| Field         | Description                                                                 |
-| ------------- | --------------------------------------------------------------------------- |
-| `wx`, `wy`    | Map-local coordinates (camera pan subtracted)                               |
-| `tile`        | `{ x, y, z, walkable, in_bounds, mat? }` — top terrain tile at pointer      |
-| `placement`   | `{ x, y, z }` — nearest placement cell (`ix`, `iy`, surface `z`), if any    |
-| `structure`   | `{ structure_id, kind }` — structure on tile or under sprite hit            |
-| `npc`         | `{ npc_id, kind }` — NPC under sprite hit, if any                           |
-| `target`      | `"npc"`, `"structure"`, `"ground"`, or omitted                              |
+| Field       | Description                                                              |
+| ----------- | ------------------------------------------------------------------------ |
+| `wx`, `wy`  | Map-local coordinates (camera pan subtracted)                            |
+| `tile`      | `{ x, y, z, walkable, in_bounds, mat? }` — top terrain tile at pointer   |
+| `placement` | `{ x, y, z }` — nearest placement cell (`ix`, `iy`, surface `z`), if any |
+| `structure` | `{ structure_id, kind }` — structure on tile or under sprite hit         |
+| `npc`       | `{ npc_id, kind }` — NPC under sprite hit, if any                        |
+| `target`    | `"npc"`, `"structure"`, `"ground"`, or omitted                           |
 
 Sprite hits use an axis-aligned box anchored at the entity feet. Optional `hit = { w, h }` on NPC/structure config overrides the default (`w`/`h` from the sprite frame).
 
@@ -167,33 +156,33 @@ Successful `query_at_design` calls also update the pick marker when `debug_draw_
 
 ### Projectile helpers
 
-| Function                    | Description                                      |
-| --------------------------- | ------------------------------------------------ |
-| `Iso.clear_projectiles()`   | Remove all in-flight projectiles on the active map |
-| `Iso.projectile_count()`    | Number of live projectiles                       |
-| `Iso.each_projectile(fn)`   | Call `fn(projectile)` for each live projectile   |
+| Function                  | Description                                        |
+| ------------------------- | -------------------------------------------------- |
+| `Iso.clear_projectiles()` | Remove all in-flight projectiles on the active map |
+| `Iso.projectile_count()`  | Number of live projectiles                         |
+| `Iso.each_projectile(fn)` | Call `fn(projectile)` for each live projectile     |
 
 ### Pause controls
 
 Pause flags stop **updates** for that layer during `tick`; drawing still runs. `is_blocked()` is unchanged (walking NPCs and in-flight projectiles still block input unless cleared).
 
-| Function / alias                              | Description                          |
-| --------------------------------------------- | ------------------------------------ |
-| `Iso.set_npc_paused(paused)` / `pause_npc()` / `play_npc()` | Freeze or resume NPC movement and mode animation |
-| `Iso.is_npc_paused()`                         | Current NPC pause flag               |
-| `Iso.set_structure_paused(paused)` / `pause_structure()` / `play_structure()` | Freeze or resume structure mode animation |
-| `Iso.is_structure_paused()`                   | Current structure pause flag         |
-| `Iso.set_projectile_paused(paused)` / `pause_projectile()` / `play_projectile()` | Freeze or resume projectile motion |
-| `Iso.is_projectile_paused()`                  | Current projectile pause flag        |
+| Function / alias                                                                 | Description                                      |
+| -------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `Iso.set_npc_paused(paused)` / `pause_npc()` / `play_npc()`                      | Freeze or resume NPC movement and mode animation |
+| `Iso.is_npc_paused()`                                                            | Current NPC pause flag                           |
+| `Iso.set_structure_paused(paused)` / `pause_structure()` / `play_structure()`    | Freeze or resume structure mode animation        |
+| `Iso.is_structure_paused()`                                                      | Current structure pause flag                     |
+| `Iso.set_projectile_paused(paused)` / `pause_projectile()` / `play_projectile()` | Freeze or resume projectile motion               |
+| `Iso.is_projectile_paused()`                                                     | Current projectile pause flag                    |
 
 Flags live on the active map as `map.npc_paused`, `map.structure_paused`, `map.projectile_paused`.
 
 ### Debug
 
-| Function                         | Description                                                                                  |
-| -------------------------------- | -------------------------------------------------------------------------------------------- |
-| `Iso.set_debug_draw_map(enable)` | Toggle map debug overlay                                                                     |
-| `Iso.debug_draw_map()`           | Current debug-draw flag                                                                      |
+| Function                         | Description              |
+| -------------------------------- | ------------------------ |
+| `Iso.set_debug_draw_map(enable)` | Toggle map debug overlay |
+| `Iso.debug_draw_map()`           | Current debug-draw flag  |
 
 When enabled, `draw_map` overlays:
 
@@ -203,6 +192,24 @@ When enabled, `draw_map` overlays:
 - Last pick marker from `query_at_design` (yellow)
 
 Can also set `debug_draw_map = true` in the init config.
+
+### Tile highlights
+
+Draw overlays on top of the current top terrain surface for specific tiles.
+
+| Function                             | Description                                    |
+| ------------------------------------ | ---------------------------------------------- |
+| `Iso.set_tile_highlights(highlights)` | Set tile highlight list (array)             |
+| `Iso.clear_tile_highlights()`       | Clear highlight overlays                        |
+
+`highlights` is an array of tables:
+
+- `tile_x`, `tile_y`: Tile coordinates to highlight
+- `kind`: Optional. Use `"corners"` to draw corner outlines; otherwise draws the top face
+- `r`, `g`, `b`, `a`: Optional color overrides (numbers, `0..1`)
+- `inset`, `len`, `line_width`: Optional extra options for `"corners"` highlights (passed through to the internal corner drawer)
+
+Highlights render only when they match the tile's current top Z (so if the stack height at that tile changes, the overlay follows that new top layer).
 
 ### `Iso.camera`
 
@@ -239,24 +246,24 @@ local iso_cfg = {
 }
 ```
 
-| Field                 | Type     | Description                                     |
-| --------------------- | -------- | ----------------------------------------------- |
-| `design_width`        | number   | Design resolution width (viewport + camera)     |
-| `design_height`       | number   | Design resolution height                        |
-| `grid_origin_x`       | number   | World tile X of stack column 0                  |
-| `grid_origin_y`       | number   | World tile Y of stack row 0                     |
-| `map_offset_y`        | number?  | Shift map anchor down on screen (default `0`)   |
-| `tile_size`           | number   | Base tile size in pixels                        |
-| `iso_x_ratio`         | number   | Half-width factor (default-style: `0.5`)        |
-| `iso_y_ratio`         | number   | Depth factor (e.g. `0.25`)                      |
-| `iso_eh_ratio`        | number   | Block height factor (e.g. `0.5`)                |
-| `terrain_mats`        | table    | Material id → spec (see below)                  |
-| `structures`          | table    | Structure kind → spec                           |
-| `npcs`                | table    | NPC kind → spec                                 |
-| `projectiles`         | table?   | Projectile kind → spec (see below)              |
-| `terrain_stack_top`   | string?  | Material id for top stack layer sprite fallback |
-| `terrain_stack_fill`  | string?  | Material id for lower stack layers fallback     |
-| `grid_point_per_tile` | number?  | Sub-tile walk grid density (default `2`)        |
+| Field                 | Type     | Description                                      |
+| --------------------- | -------- | ------------------------------------------------ |
+| `design_width`        | number   | Design resolution width (viewport + camera)      |
+| `design_height`       | number   | Design resolution height                         |
+| `grid_origin_x`       | number   | World tile X of stack column 0                   |
+| `grid_origin_y`       | number   | World tile Y of stack row 0                      |
+| `map_offset_y`        | number?  | Shift map anchor down on screen (default `0`)    |
+| `tile_size`           | number   | Base tile size in pixels                         |
+| `iso_x_ratio`         | number   | Half-width factor (default-style: `0.5`)         |
+| `iso_y_ratio`         | number   | Depth factor (e.g. `0.25`)                       |
+| `iso_eh_ratio`        | number   | Block height factor (e.g. `0.5`)                 |
+| `terrain_mats`        | table    | Material id → spec (see below)                   |
+| `structures`          | table    | Structure kind → spec                            |
+| `npcs`                | table    | NPC kind → spec                                  |
+| `projectiles`         | table?   | Projectile kind → spec (see below)               |
+| `terrain_stack_top`   | string?  | Material id for top stack layer sprite fallback  |
+| `terrain_stack_fill`  | string?  | Material id for lower stack layers fallback      |
+| `grid_point_per_tile` | number?  | Sub-tile walk grid density (default `2`)         |
 | `debug_draw_map`      | boolean? | Enable map debug overlay (placement, hits, pick) |
 
 ### `terrain_mats[id]`
@@ -292,16 +299,16 @@ Autotile variant names: `solo`, `n`, `e`, `s`, `w`, `n_e`, `e_s`, `n_s`, `w_s`, 
 
 ### `npcs[kind]`
 
-| Field                            | Description                                         |
-| -------------------------------- | --------------------------------------------------- |
-| `path`                           | Sprite sheet path                                   |
-| `sheet_w`, `sheet_h`             | Full sheet size                                     |
-| `w`, `h`                         | Frame size                                          |
-| `tiles_w`, `tiles_d`, `tiles_h`  | Footprint (default `1`)                             |
-| `draw_offset_x`, `draw_offset_y` | Screen offset from feet anchor                      |
+| Field                            | Description                                                                          |
+| -------------------------------- | ------------------------------------------------------------------------------------ |
+| `path`                           | Sprite sheet path                                                                    |
+| `sheet_w`, `sheet_h`             | Full sheet size                                                                      |
+| `w`, `h`                         | Frame size                                                                           |
+| `tiles_w`, `tiles_d`, `tiles_h`  | Footprint (default `1`)                                                              |
+| `draw_offset_x`, `draw_offset_y` | Screen offset from feet anchor                                                       |
 | `hit`                            | Optional `{ w, h }` sprite hit box for `query_at_design` (defaults to frame `w`/`h`) |
-| `facing`                         | Default facing (`"left"`, `"right"`, or 8-dir name) |
-| `modes`                          | Mode name → clip spec (see below)                   |
+| `facing`                         | Default facing (`"left"`, `"right"`, or 8-dir name)                                  |
+| `modes`                          | Mode name → clip spec (see below)                                                    |
 
 **Mode spec** — either a flat clip or directional:
 
@@ -325,17 +332,17 @@ NPC `facing` on spawn: `"left"`, `"right"`, or any 8-dir name. Walking updates f
 
 ### `projectiles[kind]`
 
-| Field            | Description                                                    |
-| ---------------- | -------------------------------------------------------------- |
-| `path`           | Optional sprite path (falls back to a colored circle)          |
-| `w`, `h`         | Frame size when using a sprite                                 |
-| `move`           | `"arc"` (default) or `"line"`                                  |
-| `duration`       | Flight time in seconds (default `0.45`)                        |
-| `arc_height`     | Screen-space arc peak for `move = "arc"` (default `40`)        |
-| `radius`         | Draw radius when no sprite (default `5`)                       |
-| `color`          | `{ r, g, b }` for procedural draw (default `{ 1, 0.85, 0.3 }`) |
-| `draw_offset_x`  | Screen offset from trajectory anchor                           |
-| `draw_offset_y`  | Screen offset from trajectory anchor                           |
+| Field           | Description                                                    |
+| --------------- | -------------------------------------------------------------- |
+| `path`          | Optional sprite path (falls back to a colored circle)          |
+| `w`, `h`        | Frame size when using a sprite                                 |
+| `move`          | `"arc"` (default) or `"line"`                                  |
+| `duration`      | Flight time in seconds (default `0.45`)                        |
+| `arc_height`    | Screen-space arc peak for `move = "arc"` (default `40`)        |
+| `radius`        | Draw radius when no sprite (default `5`)                       |
+| `color`         | `{ r, g, b }` for procedural draw (default `{ 1, 0.85, 0.3 }`) |
+| `draw_offset_x` | Screen offset from trajectory anchor                           |
+| `draw_offset_y` | Screen offset from trajectory anchor                           |
 
 Default kind when omitted on spawn events: `"bolt"`.
 
@@ -478,41 +485,41 @@ Pathfinding uses `map.placement` nodes and height rules via `map.grid`.
 
 #### `npc.remove`
 
-| Field              | Required | Description                          |
-| ------------------ | -------- | ------------------------------------ |
-| `id` or `npc_id`   | yes      | NPC to remove                        |
-| `duration`         | no       | Fade out time; omit or `0` = instant |
+| Field            | Required | Description                          |
+| ---------------- | -------- | ------------------------------------ |
+| `id` or `npc_id` | yes      | NPC to remove                        |
+| `duration`       | no       | Fade out time; omit or `0` = instant |
 
 #### `npc.shoot`
 
 Fires a projectile from an NPC, optionally playing a `shoot` or `action` mode first.
 
-| Field                                      | Required | Description                                           |
-| ------------------------------------------ | -------- | ----------------------------------------------------- |
-| `id` or `npc_id`                           | yes      | Shooter NPC                                           |
-| `tile_x`, `tile_y` **or** `to` / `to_px`   | yes      | Target (same shapes as `projectile.spawn` `to`)       |
-| `kind` or `projectile`                     | no       | Projectile kind (default `"bolt"`)                    |
-| `mode`                                     | no       | NPC mode to play; defaults to `shoot` or `action`     |
-| `loop`, `count`, `after_mode`              | no       | Playback for the shoot mode                           |
-| `delay`                                    | no       | Seconds before spawning the projectile                |
-| `on_hit`                                   | no       | Event or event list run when the projectile lands     |
-| `move`, `duration`, `arc_height`           | no       | Override projectile motion                            |
-| `projectile_id`                            | no       | Custom id for the spawned projectile                  |
+| Field                                    | Required | Description                                       |
+| ---------------------------------------- | -------- | ------------------------------------------------- |
+| `id` or `npc_id`                         | yes      | Shooter NPC                                       |
+| `tile_x`, `tile_y` **or** `to` / `to_px` | yes      | Target (same shapes as `projectile.spawn` `to`)   |
+| `kind` or `projectile`                   | no       | Projectile kind (default `"bolt"`)                |
+| `mode`                                   | no       | NPC mode to play; defaults to `shoot` or `action` |
+| `loop`, `count`, `after_mode`            | no       | Playback for the shoot mode                       |
+| `delay`                                  | no       | Seconds before spawning the projectile            |
+| `on_hit`                                 | no       | Event or event list run when the projectile lands |
+| `move`, `duration`, `arc_height`         | no       | Override projectile motion                        |
+| `projectile_id`                          | no       | Custom id for the spawned projectile              |
 
 #### `projectile.spawn`
 
-| Field                                      | Required | Description                                           |
-| ------------------------------------------ | -------- | ----------------------------------------------------- |
-| `kind` or `projectile`                     | no       | Kind from `projectiles` config (default `"bolt"`)     |
-| `from`                                     | no*      | `{ npc_id }`, `{ px, py, z? }`, or `{ tile_x, tile_y }` |
-| `to`                                       | no*      | `{ px, py, z? }` or `{ tile_x, tile_y, tiles_w?, tiles_d? }` |
-| `npc_id` or `id`                           | no       | Shorthand origin from this NPC (`id` alone implies NPC origin) |
-| `from_px`, `from_py`, `from_z`             | no       | Shorthand world origin (use with `from` table, not with `id`) |
-| `tile_x`, `tile_y`                         | no       | Shorthand tile target (center of footprint)           |
-| `to_px`, `to_py`, `to_z`                   | no       | Shorthand world target                                |
-| `move`, `duration`, `arc_height`           | no       | Motion overrides                                      |
-| `draw_offset_x`, `draw_offset_y`           | no       | Draw offset overrides                                 |
-| `on_hit`                                   | no       | Event or event list dispatched on impact              |
+| Field                            | Required | Description                                                    |
+| -------------------------------- | -------- | -------------------------------------------------------------- |
+| `kind` or `projectile`           | no       | Kind from `projectiles` config (default `"bolt"`)              |
+| `from`                           | no\*     | `{ npc_id }`, `{ px, py, z? }`, or `{ tile_x, tile_y }`        |
+| `to`                             | no\*     | `{ px, py, z? }` or `{ tile_x, tile_y, tiles_w?, tiles_d? }`   |
+| `npc_id` or `id`                 | no       | Shorthand origin from this NPC (`id` alone implies NPC origin) |
+| `from_px`, `from_py`, `from_z`   | no       | Shorthand world origin (use with `from` table, not with `id`)  |
+| `tile_x`, `tile_y`               | no       | Shorthand tile target (center of footprint)                    |
+| `to_px`, `to_py`, `to_z`         | no       | Shorthand world target                                         |
+| `move`, `duration`, `arc_height` | no       | Motion overrides                                               |
+| `draw_offset_x`, `draw_offset_y` | no       | Draw offset overrides                                          |
+| `on_hit`                         | no       | Event or event list dispatched on impact                       |
 
 \* Provide origin via `from`, `npc_id`/`id`, or `from_px`/`from_py`. Provide target via `to`, `tile_x`/`tile_y`, or `to_px`/`to_py`. Projectile instance ids are auto-generated (`proj_1`, …) unless set via `npc.shoot`'s `projectile_id`.
 
@@ -596,18 +603,18 @@ A tile with `grid_point_per_tile = 2` has up to four nodes per walkable cell (wh
 
 Returned table (selected fields):
 
-| Field                                  | Description                                  |
-| -------------------------------------- | -------------------------------------------- |
-| `source`                               | Map source table                             |
-| `pieces`                               | All pieces (terrain, structures, NPCs)       |
-| `structure_pieces`, `npc_pieces`       | Cached lists for drawing                     |
-| `layout`                               | Ground layout from `layout_for`              |
-| `placement`                            | Walk-node graph (`nodes`, `by_cell`)         |
-| `projectiles`                          | Live projectile instances (transient)        |
-| `npc_paused`, `structure_paused`, `projectile_paused` | Pause flags set via facade pause helpers |
-| `grid`                                 | See below                                    |
-| `height_at_cache`, `walkable_at_cache` | Per-tile caches                              |
-| `terrain_bake_max_z`                   | Highest baked terrain Z (internal draw hint) |
+| Field                                                 | Description                                  |
+| ----------------------------------------------------- | -------------------------------------------- |
+| `source`                                              | Map source table                             |
+| `pieces`                                              | All pieces (terrain, structures, NPCs)       |
+| `structure_pieces`, `npc_pieces`                      | Cached lists for drawing                     |
+| `layout`                                              | Ground layout from `layout_for`              |
+| `placement`                                           | Walk-node graph (`nodes`, `by_cell`)         |
+| `projectiles`                                         | Live projectile instances (transient)        |
+| `npc_paused`, `structure_paused`, `projectile_paused` | Pause flags set via facade pause helpers     |
+| `grid`                                                | See below                                    |
+| `height_at_cache`, `walkable_at_cache`                | Per-tile caches                              |
+| `terrain_bake_max_z`                                  | Highest baked terrain Z (internal draw hint) |
 
 ### `map.grid`
 
@@ -642,7 +649,7 @@ Returned table (selected fields):
 | `terrain.lua`    | Terrain draw, baking, autotile                    |
 | `structure.lua`  | Structure sprites, modes, footprint occupancy     |
 | `npc.lua`        | NPC animation, walking, queries                   |
-| `placement.lua`  | Walk-node graph build/rebuild                       |
+| `placement.lua`  | Walk-node graph build/rebuild                     |
 | `path.lua`       | Pathfinding and step helpers on placement graph   |
 | `projectile.lua` | Projectile spawn, motion, draw, `on_hit` dispatch |
 | `events.lua`     | Event dispatch                                    |

@@ -24,6 +24,14 @@ local CULL_MAX_Z = 1
 
 local current_map
 local pick_marker
+local tile_highlights
+
+local HIGHLIGHT_DEFAULT = {
+    r = 0.1,
+    g = 0.1,
+    b = 0.1,
+    a = 0.3,
+}
 
 local function active_map()
     if not current_map then
@@ -687,6 +695,38 @@ local function draw_layer_entry(lg, layout, source, cache, map, entry)
         return
     end
 
+    if entry.type == "tile_highlight" then
+        local h = entry.highlight
+
+        if h.kind == "corners" then
+            Tile.draw_corner_highlight(
+                lg,
+                layout,
+                entry.tile_x,
+                entry.tile_y,
+                entry.tile_z,
+                h.r or 0.95,
+                h.g or 0.95,
+                h.b or 1,
+                h.a or 0.9,
+                h
+            )
+        else
+            Tile.draw_top_face(
+                lg,
+                layout,
+                entry.tile_x,
+                entry.tile_y,
+                entry.tile_z,
+                h.r or HIGHLIGHT_DEFAULT.r,
+                h.g or HIGHLIGHT_DEFAULT.g,
+                h.b or HIGHLIGHT_DEFAULT.b,
+                h.a or HIGHLIGHT_DEFAULT.a
+            )
+        end
+        return
+    end
+
     if entry.type == "npc" then
         Npc.draw(entry.piece, lg, layout, entry.piece.alpha, function(tx, ty)
             return Tile.top_z_from_cache(source, cache, tx, ty)
@@ -1260,6 +1300,48 @@ local function draw_pick_marker(lg, layout)
     lg.setLineWidth(1)
 end
 
+local function insert_tile_highlight_entries(
+    buckets,
+    min_sum,
+    max_sum,
+    source,
+    cache,
+    view_rect,
+    tile_z
+)
+    if not tile_highlights or #tile_highlights == 0 or not view_rect then
+        return min_sum, max_sum
+    end
+
+    for i = 1, #tile_highlights do
+        local h = tile_highlights[i]
+        local tx = h.tile_x
+        local ty = h.tile_y
+
+        if tx ~= nil and ty ~= nil and tile_in_rect(tx, ty, view_rect) then
+            local top_z = Tile.top_z_from_cache(source, cache, tx, ty)
+
+            if top_z == tile_z then
+                local sum, stx, sty = footprint_sort_key(tx, ty, 1, 1, source, cache)
+                local entry = entry_take()
+
+                entry.type = "tile_highlight"
+                entry.highlight = h
+                entry.tile_x = tx
+                entry.tile_y = ty
+                entry.tile_z = top_z
+                entry.sum = sum
+                entry.tx = stx
+                entry.ty = sty
+                entry.sort_layer = 1.5
+                min_sum, max_sum = sum_bucket_insert(buckets, min_sum, max_sum, entry)
+            end
+        end
+    end
+
+    return min_sum, max_sum
+end
+
 local function draw_npc_pos_debug(map, lg, layout, view_rect)
     if not cfg().debug_draw_map or not view_rect then
         return
@@ -1345,6 +1427,16 @@ function M.draw_map()
             end
         end
 
+        min_sum, max_sum = insert_tile_highlight_entries(
+            buckets,
+            min_sum,
+            max_sum,
+            source,
+            cache,
+            view_rect,
+            tile_z
+        )
+
         for _, piece in ipairs(current_map.structure_pieces or {}) do
             if piece_in_view(piece, view_rect) then
                 local sum, tx, ty = piece_sort_key(piece, source, cache)
@@ -1417,6 +1509,19 @@ function M.set_pick_marker(wx, wy)
     pick_marker = { wx = wx, wy = wy }
 end
 
+function M.set_tile_highlights(highlights)
+    if not highlights or #highlights == 0 then
+        tile_highlights = nil
+        return
+    end
+
+    tile_highlights = highlights
+end
+
+function M.clear_tile_highlights()
+    tile_highlights = nil
+end
+
 function M.set_debug_draw_map(enable)
     cfg().debug_draw_map = enable and true or false
 end
@@ -1464,6 +1569,7 @@ end
 
 function M.load_map(src)
     pick_marker = nil
+    tile_highlights = nil
     current_map = M.create_map(src)
     current_map._terrain_cache = nil
     current_map._terrain_cache_key = nil
