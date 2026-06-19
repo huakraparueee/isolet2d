@@ -684,9 +684,14 @@ local function update_terrain_removals(map, dt)
     map.pieces = kept
     map.sync_structure_pieces()
     map.sync_npc_pieces()
+    Terrain.prune_live_terrain_pieces(map)
 
     for _, tile in ipairs(removed_tiles) do
         map.refresh_height_at(tile[1], tile[2])
+    end
+
+    if #removed_tiles > 0 then
+        Terrain.reindex_chunk_layers(map)
     end
 
     if map.rebuild_placement_tile then

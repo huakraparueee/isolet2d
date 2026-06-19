@@ -36,6 +36,7 @@ function M.build(raw)
         npcs = raw.npcs or {},
         projectiles = raw.projectiles or {},
         debug_draw_map = raw.debug_draw_map == true,
+        terrain_bake = raw.terrain_bake == true,
     }
 end
 

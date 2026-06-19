@@ -580,7 +580,7 @@ function Terrain.update(dt)
     end
 end
 
-local CHUNK_TILES = 25
+local CHUNK_TILES = 40
 
 local function fill_top_face_at(lg, cx, cy, screen_scale, r, g, b, a, size_mul)
     size_mul = size_mul or 1
@@ -972,6 +972,18 @@ local function piece_bakeable(piece)
         and (piece.alpha or 1) >= 1
 end
 
+local function terrain_bake()
+    return Setup.get().terrain_bake == true
+end
+
+local function bake_z_max(map)
+    if terrain_bake() then
+        return map.terrain_bake_max_z or 0
+    end
+
+    return map.min_visible_z or 0
+end
+
 local function is_baked_terrain(piece)
     return Terrain.is_terrain_block(piece) and piece.baked == true
 end
@@ -1022,25 +1034,6 @@ local function piece_screen_bounds(layout, map, piece, top_z)
     return cx - hw, yt - hd, cx + hw, cy + hd
 end
 
-local function gather_chunk_pieces(map, cx, cy, tile_z)
-    local min_tx, min_ty, max_tx, max_ty = chunk_tile_bounds(cx, cy, map.source)
-    local pieces = {}
-
-    for _, piece in ipairs(map.pieces or {}) do
-        if is_baked_terrain(piece)
-            and (piece.tile_z or 0) == tile_z
-            and piece.tile_x >= min_tx
-            and piece.tile_x <= max_tx
-            and piece.tile_y >= min_ty
-            and piece.tile_y <= max_ty
-        then
-            pieces[#pieces + 1] = piece
-        end
-    end
-
-    return pieces, min_tx, min_ty, max_tx, max_ty
-end
-
 local function sort_terrain_entries(entries)
     table.sort(entries, function(a, b)
         if a.sum ~= b.sum then
@@ -1055,7 +1048,49 @@ local function sort_terrain_entries(entries)
     end)
 end
 
-local function layer_pieces_in_chunk_layer(map, cx, cy, tile_z)
+local function chunk_layer_key(cx, cy, tile_z)
+    return cx .. "," .. cy .. "," .. tile_z
+end
+
+function Terrain.reindex_chunk_layers(map)
+    local by_chunk = {}
+    local max_z = 0
+
+    for _, piece in ipairs(map.pieces or {}) do
+        if not piece._removed and Terrain.is_terrain_block(piece) then
+            local tile_z = piece.tile_z or 0
+
+            max_z = math.max(max_z, tile_z)
+
+            local cx, cy = tile_chunk_index(piece.tile_x, piece.tile_y)
+            local key = chunk_layer_key(cx, cy, tile_z)
+            local list = by_chunk[key]
+
+            if not list then
+                list = {}
+                by_chunk[key] = list
+            end
+
+            list[#list + 1] = piece
+        end
+    end
+
+    map.pieces_by_chunk_layer = by_chunk
+
+    return max_z
+end
+
+local function chunk_layer_pieces(map, cx, cy, tile_z)
+    local by_chunk = map.pieces_by_chunk_layer
+
+    if not by_chunk then
+        return nil
+    end
+
+    return by_chunk[chunk_layer_key(cx, cy, tile_z)]
+end
+
+local function layer_pieces_in_chunk_layer_scan(map, cx, cy, tile_z)
     local min_tx, min_ty, max_tx, max_ty = chunk_tile_bounds(cx, cy, map.source)
     local pieces = {}
 
@@ -1076,6 +1111,37 @@ local function layer_pieces_in_chunk_layer(map, cx, cy, tile_z)
     return pieces
 end
 
+local function layer_pieces_in_chunk_layer(map, cx, cy, tile_z)
+    local layer = chunk_layer_pieces(map, cx, cy, tile_z)
+
+    if not layer then
+        return layer_pieces_in_chunk_layer_scan(map, cx, cy, tile_z)
+    end
+
+    if #layer == 0 then
+        return layer
+    end
+
+    local updates = map.pieces_updates
+    local removals = map.pieces_removals
+
+    if (not updates or #updates == 0) and (not removals or #removals == 0) then
+        return layer
+    end
+
+    local pieces = {}
+
+    for i = 1, #layer do
+        local piece = layer[i]
+
+        if not is_terrain_animating(map, piece.tile_x, piece.tile_y) then
+            pieces[#pieces + 1] = piece
+        end
+    end
+
+    return pieces
+end
+
 local function apply_bake_flags_in_layer(map, cx, cy, tile_z)
     local pieces = layer_pieces_in_chunk_layer(map, cx, cy, tile_z)
 
@@ -1086,10 +1152,14 @@ local function apply_bake_flags_in_layer(map, cx, cy, tile_z)
     for i = 1, #pieces do
         local piece = pieces[i]
 
-        piece.baked = piece_bakeable(piece)
-            and not piece_is_stack_top(map, piece)
-            and not piece_adjacent_to_transparent_mat(map, piece)
-            and not piece_adjacent_to_open_edge(map, piece)
+        if terrain_bake() then
+            piece.baked = piece_bakeable(piece)
+        else
+            piece.baked = piece_bakeable(piece)
+                and not piece_is_stack_top(map, piece)
+                and not piece_adjacent_to_transparent_mat(map, piece)
+                and not piece_adjacent_to_open_edge(map, piece)
+        end
     end
 end
 
@@ -1102,12 +1172,16 @@ local function bake_chunk(map, cx, cy, tile_z)
         return nil
     end
 
-    local pieces, min_tx, min_ty, max_tx, max_ty = gather_chunk_pieces(
-        map,
-        cx,
-        cy,
-        tile_z
-    )
+    local pieces = {}
+    local min_tx, min_ty, max_tx, max_ty = chunk_tile_bounds(cx, cy, source)
+
+    for i = 1, #layer_pieces do
+        local piece = layer_pieces[i]
+
+        if is_baked_terrain(piece) then
+            pieces[#pieces + 1] = piece
+        end
+    end
 
     if #pieces == 0 then
         return nil
@@ -1207,6 +1281,78 @@ local function find_chunk_slot(map, cx, cy, tile_z)
     end
 end
 
+local function remove_live_terrain_in_chunk_layer(map, cx, cy, tile_z)
+    local list = map.live_terrain_pieces
+
+    if not list then
+        return
+    end
+
+    for i = #list, 1, -1 do
+        local piece = list[i]
+        local pcx, pcy = tile_chunk_index(piece.tile_x, piece.tile_y)
+
+        if pcx == cx and pcy == cy and (piece.tile_z or 0) == tile_z then
+            table.remove(list, i)
+        end
+    end
+end
+
+local function refresh_live_terrain_chunk_layer(map, cx, cy, tile_z)
+    map.live_terrain_pieces = map.live_terrain_pieces or {}
+    remove_live_terrain_in_chunk_layer(map, cx, cy, tile_z)
+
+    local pieces = layer_pieces_in_chunk_layer(map, cx, cy, tile_z)
+    local list = map.live_terrain_pieces
+
+    for i = 1, #pieces do
+        local piece = pieces[i]
+
+        if not piece.baked then
+            list[#list + 1] = piece
+        end
+    end
+end
+
+local function finalize_live_terrain_pieces(map)
+    if terrain_bake() then
+        map.live_terrain_pieces = {}
+        return
+    end
+
+    local list = {}
+
+    for _, piece in ipairs(map.pieces or {}) do
+        if not piece._removed and Terrain.is_terrain_block(piece) and not piece.baked then
+            list[#list + 1] = piece
+        end
+    end
+
+    map.live_terrain_pieces = list
+end
+
+function Terrain.prune_live_terrain_pieces(map)
+    local list = map.live_terrain_pieces
+
+    if not list or #list == 0 then
+        return
+    end
+
+    local kept = {}
+    local n = 0
+
+    for i = 1, #list do
+        local piece = list[i]
+
+        if not piece._removed then
+            n = n + 1
+            kept[n] = piece
+        end
+    end
+
+    map.live_terrain_pieces = kept
+end
+
 local function rebake_layer_chunk(map, cx, cy, tile_z)
     map.terrain_chunks = map.terrain_chunks or {}
     local idx = find_chunk_slot(map, cx, cy, tile_z)
@@ -1227,6 +1373,8 @@ local function rebake_layer_chunk(map, cx, cy, tile_z)
     elseif idx then
         table.remove(map.terrain_chunks, idx)
     end
+
+    refresh_live_terrain_chunk_layer(map, cx, cy, tile_z)
 end
 
 local function bump_bake_max_z(map, tile_x, tile_y)
@@ -1238,7 +1386,7 @@ end
 
 local function process_dirty_chunks(map)
     local dirty = map.terrain_dirty_chunks
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
 
     if not dirty then
         return
@@ -1278,7 +1426,11 @@ function Terrain.recompute_min_visible_z(map)
 end
 
 local function clear_upper_baked_flags(map)
-    local floor_max_z = map.min_visible_z or 0
+    if terrain_bake() then
+        return
+    end
+
+    local floor_max_z = bake_z_max(map)
 
     for _, piece in ipairs(map.pieces or {}) do
         if Terrain.is_terrain_block(piece) and (piece.tile_z or 0) > floor_max_z then
@@ -1288,52 +1440,97 @@ local function clear_upper_baked_flags(map)
 end
 
 local function bake_floor_chunks(map)
+    Terrain.prepare_bake(map)
+
+    while map.terrain_bake_queue and #map.terrain_bake_queue > 0 do
+        Terrain.process_bake_queue(map, #map.terrain_bake_queue)
+    end
+end
+
+function Terrain.prepare_bake(map)
+    sync_tile_size()
+
+    map.terrain_bake_max_z = Terrain.reindex_chunk_layers(map)
+    Terrain.recompute_min_visible_z(map)
+
+    map.terrain_chunks = {}
+    map.terrain_dirty_chunks = {}
+    map.terrain_bake_queue = {}
+    map.terrain_bake_done = 0
+    map.terrain_bake_total = 0
+
+    clear_upper_baked_flags(map)
+
     local source = map.source
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
     local ncx = math.ceil(source.tiles_w / CHUNK_TILES)
     local ncy = math.ceil(source.tiles_d / CHUNK_TILES)
 
     for tile_z = 0, floor_max_z do
         for cy = 0, ncy - 1 do
             for cx = 0, ncx - 1 do
-                apply_bake_flags_in_layer(map, cx, cy, tile_z)
-
-                local chunk = bake_chunk(map, cx, cy, tile_z)
-
-                if chunk then
-                    map.terrain_chunks[#map.terrain_chunks + 1] = chunk
-                end
+                map.terrain_bake_total = map.terrain_bake_total + 1
+                map.terrain_bake_queue[#map.terrain_bake_queue + 1] = {
+                    cx = cx,
+                    cy = cy,
+                    tile_z = tile_z,
+                }
             end
         end
     end
 end
 
-function Terrain.build_bake(map)
-    sync_tile_size()
+function Terrain.bake_pending(map)
+    local queue = map and map.terrain_bake_queue
 
-    local max_z = 0
+    return queue ~= nil and #queue > 0
+end
 
-    for _, piece in ipairs(map.pieces or {}) do
-        if Terrain.is_terrain_block(piece) then
-            max_z = math.max(max_z, piece.tile_z or 0)
-        end
+function Terrain.process_bake_queue(map, max_jobs)
+    local queue = map.terrain_bake_queue
+
+    if not queue or #queue == 0 then
+        return true, "Ready"
     end
 
-    map.terrain_bake_max_z = max_z
-    Terrain.recompute_min_visible_z(map)
+    max_jobs = max_jobs or 4
+    local jobs = math.min(max_jobs, #queue)
 
-    map.terrain_chunks = {}
-    map.terrain_dirty_chunks = {}
+    for _ = 1, jobs do
+        local job = table.remove(queue, 1)
+        apply_bake_flags_in_layer(map, job.cx, job.cy, job.tile_z)
 
-    clear_upper_baked_flags(map)
+        local chunk = bake_chunk(map, job.cx, job.cy, job.tile_z)
+
+        if chunk then
+            map.terrain_chunks[#map.terrain_chunks + 1] = chunk
+        end
+
+        map.terrain_bake_done = (map.terrain_bake_done or 0) + 1
+    end
+
+    if #queue == 0 then
+        map.terrain_bake_queue = nil
+        finalize_live_terrain_pieces(map)
+        return true, "Ready"
+    end
+
+    local done = map.terrain_bake_done or 0
+    local total = map.terrain_bake_total or done
+
+    return false, string.format("Baking terrain %d/%d", done, total)
+end
+
+function Terrain.build_bake(map)
     bake_floor_chunks(map)
 end
 
 function Terrain.rebuild_floor_chunks(map)
     sync_tile_size()
+    Terrain.reindex_chunk_layers(map)
     Terrain.recompute_min_visible_z(map)
 
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
     local kept = {}
 
     for _, chunk in ipairs(map.terrain_chunks or {}) do
@@ -1363,7 +1560,7 @@ function Terrain.rebuild_floor_chunks(map)
 end
 
 local function mark_layer_dirty(map, tile_x, tile_y, tile_z)
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
 
     if tile_z > floor_max_z then
         return
@@ -1385,7 +1582,7 @@ function Terrain.mark_tile_dirty(map, tile_x, tile_y, tile_z)
         return
     end
 
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
 
     for z = 0, floor_max_z do
         mark_layer_dirty(map, tile_x, tile_y, z)
@@ -1399,7 +1596,7 @@ function Terrain.mark_piece_dynamic(map, piece)
 
     piece.bake = false
 
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
     local tile_z = piece.tile_z or 0
     local cx, cy = tile_chunk_index(piece.tile_x, piece.tile_y)
 
@@ -1415,7 +1612,7 @@ function Terrain.finish_piece_bake(map, piece)
 
     piece.bake = nil
 
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
     local tile_z = piece.tile_z or 0
 
     if tile_z > floor_max_z then
@@ -1445,7 +1642,7 @@ local REBAKE_NEIGHBOR_OFFS = {
 }
 
 function Terrain.rebake_tile_now(map, tile_x, tile_y)
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
     local dirty = {}
 
     for _, off in ipairs(REBAKE_NEIGHBOR_OFFS) do
@@ -1541,16 +1738,27 @@ function Terrain.draw_unit_cube(lg, layout, _cache, map, tile_x, tile_y, tile_z,
     )
 end
 
-function Terrain.draw(map)
+local function chunk_in_view(chunk, view_rect)
+    if not view_rect then
+        return true
+    end
+
+    return chunk.max_tx >= view_rect.min_tx
+        and chunk.min_tx <= view_rect.max_tx
+        and chunk.max_ty >= view_rect.min_ty
+        and chunk.min_ty <= view_rect.max_ty
+end
+
+function Terrain.draw(map, view_rect)
     sync_tile_size()
     process_dirty_chunks(map)
 
-    local floor_max_z = map.min_visible_z or 0
+    local floor_max_z = bake_z_max(map)
 
     for tile_z = 0, floor_max_z do
         love.graphics.setColor(1, 1, 1, 1)
         for _, chunk in ipairs(map.terrain_chunks or {}) do
-            if chunk.tile_z == tile_z then
+            if chunk.tile_z == tile_z and chunk_in_view(chunk, view_rect) then
                 love.graphics.draw(chunk.canvas, chunk.x, chunk.y)
             end
         end

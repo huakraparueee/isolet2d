@@ -14,7 +14,7 @@ local Projectile = {}
 local catalogs = {}
 local pool = {}
 local next_id = 1
-local MAX_ACTIVE = 32
+local MAX_ACTIVE = 512
 
 local function release(proj)
     for k in pairs(proj) do
@@ -533,9 +533,19 @@ function Projectile.draw(proj, lg, layout)
     sy = sy + (draw_oy or 0) * scale
 
     local color = cat and cat.color or { 1, 0.85, 0.3 }
-    local dx = proj.to_px - proj.from_px
-    local dy = proj.to_py - proj.from_py
-    local angle = math.atan2(dy, dx)
+    local fsx, fsy = Tile.placement_to_screen(
+        layout,
+        proj.from_px,
+        proj.from_py,
+        proj.from_z or 0
+    )
+    local tsx, tsy = Tile.placement_to_screen(
+        layout,
+        proj.to_px,
+        proj.to_py,
+        proj.to_z or 0
+    )
+    local angle = math.atan2(tsy - fsy, tsx - fsx)
 
     if cat and cat.image then
         local w = cat.w or cat.image:getWidth()

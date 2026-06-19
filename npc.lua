@@ -447,7 +447,7 @@ local function finish_walk(state, piece, map)
     end
 
     clear_walk(state)
-    set_mode(state, "stand")
+    state.stand_after = true
 end
 
 local function npc_spec(kind)
@@ -586,6 +586,81 @@ local function is_walking(state)
     return state.path ~= nil
 end
 
+local MOVE_SUB_STEP_SCALE = 0.25
+
+local function pos_has_placement_node(map, px, py)
+    local ix, iy = Placement.cell_ix(px, py)
+
+    return Placement.has_cell(map, ix, iy)
+end
+
+local function advance_on_graph(map, px, py, dx, dy, dist, max_step)
+    if dist <= 0.0001 then
+        return px, py, false
+    end
+
+    local ux = dx / dist
+    local uy = dy / dist
+    local sub = Placement.pos_step() * MOVE_SUB_STEP_SCALE
+    local remain = math.min(max_step, dist)
+    local nx, ny = px, py
+    local moved = false
+
+    while remain > 0.00001 do
+        local s = math.min(remain, sub)
+        local tx = nx + ux * s
+        local ty = ny + uy * s
+
+        if pos_has_placement_node(map, tx, ty) then
+            nx, ny = tx, ty
+            remain = remain - s
+            moved = true
+        else
+            break
+        end
+    end
+
+    return nx, ny, moved
+end
+
+local function dist_sq(ax, ay, bx, by)
+    local dx = ax - bx
+    local dy = ay - by
+
+    return dx * dx + dy * dy
+end
+
+local function graph_step_toward(map, px, py, tx, ty)
+    local best_node
+    local best_d = dist_sq(px, py, tx, ty)
+    local dirs = {
+        { 1, 0 },
+        { -1, 0 },
+        { 0, 1 },
+        { 0, -1 },
+        { -1, 1 },
+        { 1, -1 },
+        { -1, -1 },
+        { 1, 1 },
+    }
+
+    for i = 1, #dirs do
+        local off = dirs[i]
+        local node = Path.try_step_neighbor(map, px, py, off[1], off[2])
+
+        if node then
+            local d = dist_sq(node.px, node.py, tx, ty)
+
+            if d < best_d - 0.000001 then
+                best_d = d
+                best_node = node
+            end
+        end
+    end
+
+    return best_node
+end
+
 local REPATH_GOAL_EPS_SQ = 2.25
 
 local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
@@ -615,10 +690,12 @@ local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
     state.mode_left = nil
     state.after_mode = nil
     clear_walk(state)
+    state.stand_after = false
 
     local path = Path.find_path_pos(map, piece.pos_x, piece.pos_y, goal_x, goal_y)
 
     if path == nil then
+        state.stand_after = false
         set_mode(state, "stand")
         return false
     end
@@ -653,6 +730,7 @@ local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
     state.path = path
     state.path_i = 1
     begin_path_segment(state, piece, map, path[1])
+    state.stand_after = false
     set_mode(state, "walk")
     
     -- 🛠 แก้ไข: คำนวณทิศทางเริ่มต้นจากตำแหน่งปัจจุบันของตัวละครไปยัง Waypoint แรก
@@ -661,6 +739,11 @@ local function walk_state_to_pos(state, piece, map, goal_x, goal_y, tile_z)
 end
 
 local function update_state(state, piece, map, dt)
+    if state.stand_after and not state.path then
+        set_mode(state, "stand")
+        state.stand_after = false
+    end
+
     state.current:update(dt)
 
     if not state.path then
@@ -706,8 +789,25 @@ local function update_state(state, piece, map, dt)
     local seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
     local speed = walk_speed_for_segment(map, state.walkspeed, seg_dx, seg_dy)
     local step = math.min(dist, speed * dt)
-    piece.pos_x = px + (dx / dist) * step
-    piece.pos_y = py + (dy / dist) * step
+    local nx, ny, moved = advance_on_graph(map, px, py, dx, dy, dist, step)
+
+    if not moved and step > 0.00001 then
+        local node = graph_step_toward(map, px, py, wp.x, wp.y)
+
+        if node then
+            piece.pos_x = node.px
+            piece.pos_y = node.py
+            piece.tile_z = node.z
+            return
+        end
+
+        clear_walk(state)
+        set_mode(state, "stand")
+        return
+    end
+
+    piece.pos_x = nx
+    piece.pos_y = ny
     local moved_x = piece.pos_x - state.seg_x0
     local moved_y = piece.pos_y - state.seg_y0
     local moved = math.sqrt(moved_x * moved_x + moved_y * moved_y)
@@ -808,6 +908,7 @@ end
 function Npc.clear_piece_walk(piece)
     if piece.npc then
         clear_walk(piece.npc)
+        piece.npc.stand_after = false
     end
 end
 
@@ -860,6 +961,7 @@ function Npc.preload_npcs()
 end
 
 function Npc.load()
+    catalogs = {}
     T = Setup.get().tile_size
     Npc.preload_npcs()
 end
@@ -1082,6 +1184,16 @@ function Npc.walk_to_pos(map, pos_x, pos_y, id_filter, tile_z)
     each_npc_for_filter(map, id_filter, function(piece)
         walk_state_to_pos(piece.npc, piece, map, pos_x, pos_y, tile_z)
     end)
+end
+
+function Npc.try_walk_to_pos(map, pos_x, pos_y, npc_id, tile_z)
+    local piece = npc_piece_for_id(map, npc_id)
+
+    if not piece or not piece.npc then
+        return false
+    end
+
+    return walk_state_to_pos(piece.npc, piece, map, pos_x, pos_y, tile_z)
 end
 
 function Npc.is_anim_busy(map, id_filter)

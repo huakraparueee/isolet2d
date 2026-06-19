@@ -18,7 +18,7 @@ local M = {
     camera = Camera,
 }
 
-local CULL_PAD_TILES = 1
+local CULL_PAD_TILES = 5
 local CULL_CACHE_PAD_TILES = 1
 local CULL_MAX_Z = 1
 
@@ -220,6 +220,35 @@ local function sync_npc_pieces(map)
     map.npc_by_id = by_id
 end
 
+local build_debug_placement_canvas
+local build_debug_structure_hits
+
+local function release_debug_draw(map)
+    if not map then
+        return
+    end
+
+    local baked = map._debug_placement_canvas
+
+    if baked and baked.canvas then
+        baked.canvas:release()
+    end
+
+    map._debug_placement_canvas = nil
+    map._debug_structure_hits = nil
+end
+
+local function refresh_debug_draw_cache(map)
+    release_debug_draw(map)
+
+    if not map or not cfg().debug_draw_map then
+        return
+    end
+
+    build_debug_placement_canvas(map)
+    build_debug_structure_hits(map)
+end
+
 function M.bind_grid(map, src)
     local c = cfg()
 
@@ -261,14 +290,20 @@ function M.bind_grid(map, src)
     map.refresh_height_at = function(tile_x, tile_y)
         refresh_height_at(map, src, tile_x, tile_y)
         Placement.rebuild_tile(map, tile_x, tile_y)
+        refresh_debug_draw_cache(map)
     end
 
     map.rebuild_placement_tile = function(tile_x, tile_y)
         Placement.rebuild_tile(map, tile_x, tile_y)
+        refresh_debug_draw_cache(map)
     end
 
     map.sync_structure_pieces = function()
         sync_structure_pieces(map)
+
+        if cfg().debug_draw_map then
+            build_debug_structure_hits(map)
+        end
     end
 
     map.sync_npc_pieces = function()
@@ -300,7 +335,7 @@ function M.bind_grid(map, src)
     end
 end
 
-function M.create_map(src)
+function M.create_map(src, opts)
     Stack.dims(src)
 
     -- 1. tile screen layout
@@ -311,6 +346,7 @@ function M.create_map(src)
         source = src,
         layout = layout,
         pieces = Terrain.initial_pieces(src, in_bounds_for),
+        live_terrain_pieces = {},
         pieces_updates = nil,
         pieces_removals = nil,
         pending_ops = nil,
@@ -326,9 +362,15 @@ function M.create_map(src)
 
     -- 4. placement graph from terrain + structure
     Placement.rebuild(map)
+    refresh_debug_draw_cache(map)
 
     sync_npc_pieces(map)
-    Terrain.build_bake(map)
+
+    if opts and opts.defer_bake then
+        Terrain.prepare_bake(map)
+    else
+        Terrain.build_bake(map)
+    end
 
     return map
 end
@@ -343,6 +385,10 @@ end
 
 function M.is_npc_anim_busy(id)
     return Npc.is_anim_busy(active_map(), id)
+end
+
+function M.try_walk_to_pos(id, pos_x, pos_y, tile_z)
+    return Npc.try_walk_to_pos(active_map(), pos_x, pos_y, id, tile_z)
 end
 
 function M.pos_step()
@@ -468,6 +514,28 @@ end
 
 function M.on_walkable_cell(piece)
     return Placement.on_walkable_cell(active_map(), piece)
+end
+
+function M.tile_walkable(tile_x, tile_y)
+    local map = active_map()
+    local grid = map and map.grid
+
+    if not grid or not grid.in_bounds(tile_x, tile_y) then
+        return false
+    end
+
+    return grid.height_at(tile_x, tile_y) > 0 and grid.walkable_at(tile_x, tile_y)
+end
+
+function M.npc_spawn_tile(tile_x, tile_y, tiles_w, tiles_d)
+    local map = active_map()
+
+    if not M.tile_walkable(tile_x, tile_y) then
+        return false
+    end
+
+    return Placement.node_for_footprint(map, tile_x, tile_y, tiles_w or 1, tiles_d or 1)
+        ~= nil
 end
 
 function M.placement_pos(ix, iy)
@@ -928,6 +996,99 @@ local function structure_feet_screen(map, layout, piece, z_at)
     })
 end
 
+build_debug_placement_canvas = function(map)
+    local placement = map.placement
+    local layout = map.layout
+
+    if not placement or not layout or #placement.nodes == 0 then
+        return
+    end
+
+    local min_x, min_y = math.huge, math.huge
+    local max_x, max_y = -math.huge, -math.huge
+
+    for i = 1, #placement.nodes do
+        local node = placement.nodes[i]
+
+        min_x = math.min(min_x, node.sx)
+        min_y = math.min(min_y, node.sy)
+        max_x = math.max(max_x, node.sx)
+        max_y = math.max(max_y, node.sy)
+    end
+
+    local pad = layout.tile_size * (layout.scale or 1)
+    local offset_x = min_x - pad
+    local offset_y = min_y - pad
+    local canvas_w = math.ceil(max_x - min_x + pad * 2)
+    local canvas_h = math.ceil(max_y - min_y + pad * 2)
+    local canvas = love.graphics.newCanvas(canvas_w, canvas_h)
+    local r = math.max(1, math.floor(pad * 0.02 + 0.5))
+
+    canvas:setFilter("nearest", "nearest")
+
+    love.graphics.push()
+    love.graphics.setCanvas(canvas)
+    love.graphics.clear(0, 0, 0, 0)
+    love.graphics.translate(-offset_x, -offset_y)
+    love.graphics.setColor(0.2, 1, 0.35, 0.55)
+
+    for i = 1, #placement.nodes do
+        local node = placement.nodes[i]
+
+        love.graphics.circle("fill", node.sx, node.sy, r)
+    end
+
+    love.graphics.setCanvas()
+    love.graphics.pop()
+    love.graphics.setColor(1, 1, 1, 1)
+
+    map._debug_placement_canvas = {
+        canvas = canvas,
+        x = offset_x,
+        y = offset_y,
+    }
+end
+
+build_debug_structure_hits = function(map)
+    local layout = map.layout
+    local source = map.source
+    local cache = Tile.build_render_cache(map, nil)
+    local z_at = function(tx, ty)
+        return Tile.top_z_from_cache(source, cache, tx, ty)
+    end
+    local scale = layout.scale or 1
+    local out = {}
+
+    for _, piece in ipairs(map.structure_pieces or {}) do
+        if not piece._removed and Structure.is_piece(piece) then
+            local def = cfg().structures[piece.structure]
+
+            if def then
+                local feet_x, feet_y = structure_feet_screen(map, layout, piece, z_at)
+                local hit_w, hit_h = resolve_hit_size(def)
+                local x0, y0, x1, y1 = aabb_hit_bounds(
+                    feet_x,
+                    feet_y,
+                    hit_w,
+                    hit_h,
+                    scale
+                )
+
+                out[#out + 1] = {
+                    x0 = x0,
+                    y0 = y0,
+                    w = x1 - x0,
+                    h = y1 - y0,
+                    tile_x = piece.tile_x,
+                    tile_y = piece.tile_y,
+                }
+            end
+        end
+    end
+
+    map._debug_structure_hits = out
+end
+
 local function pack_structure(piece)
     if not piece then
         return nil
@@ -1182,8 +1343,15 @@ end
 local function collect_terrain_draw_entries(map, source, cache, view_rect)
     local by_z = {}
     local max_z = map.terrain_bake_max_z or 0
+    local pieces = map.live_terrain_pieces
 
-    for _, piece in ipairs(map.pieces or {}) do
+    if not pieces or #pieces == 0 then
+        return by_z, max_z
+    end
+
+    for i = 1, #pieces do
+        local piece = pieces[i]
+
         if is_live_terrain_piece(piece) and piece_in_view(piece, view_rect) then
             local tile_z = piece.tile_z or 0
             local sum, tx, ty = piece_sort_key(piece, source, cache)
@@ -1283,45 +1451,53 @@ local function collect_npc_draw_entries(map, source, cache, view_rect)
     return by_z, max_z
 end
 
-local function draw_placement_debug(map, lg, layout, view_rect)
-    if not cfg().debug_draw_map or not view_rect then
+local function draw_placement_debug(map, lg)
+    if not cfg().debug_draw_map then
         return
     end
 
-    local placement = map.placement
+    local baked = map._debug_placement_canvas
 
-    if not placement then
+    if not baked or not baked.canvas then
         return
     end
 
-    local r = math.max(1, math.floor((layout.tile_size or 64) * (layout.scale or 1) * 0.02 + 0.5))
-
-    lg.setColor(0.2, 1, 0.35, 0.55)
-
-    for _, node in ipairs(placement.nodes) do
-        if node.tile_x >= view_rect.min_tx
-            and node.tile_x <= view_rect.max_tx
-            and node.tile_y >= view_rect.min_ty
-            and node.tile_y <= view_rect.max_ty
-        then
-            lg.circle("fill", node.sx, node.sy, r)
-        end
-    end
+    lg.setColor(1, 1, 1, 1)
+    lg.draw(baked.canvas, baked.x, baked.y)
 end
 
-local function draw_hit_debug(map, lg, layout, view_rect)
-    if not cfg().debug_draw_map or not view_rect then
+local function draw_hit_debug(map, lg, layout, view_rect, cache)
+    if not cfg().debug_draw_map or not view_rect or not cache then
         return
     end
 
     local source = map.source
-    local cache = Tile.build_render_cache(map, view_rect)
     local z_at = function(tx, ty)
         return Tile.top_z_from_cache(source, cache, tx, ty)
     end
     local scale = layout.scale or 1
 
     lg.setLineWidth(1)
+
+    local structure_hits = map._debug_structure_hits
+
+    if structure_hits then
+        lg.setColor(1, 0.45, 0.9, 0.85)
+
+        for i = 1, #structure_hits do
+            local hit = structure_hits[i]
+
+            if hit.tile_x >= view_rect.min_tx
+                and hit.tile_x <= view_rect.max_tx
+                and hit.tile_y >= view_rect.min_ty
+                and hit.tile_y <= view_rect.max_ty
+            then
+                lg.rectangle("line", hit.x0, hit.y0, hit.w, hit.h)
+            end
+        end
+    end
+
+    lg.setColor(0.35, 0.75, 1, 0.85)
 
     for _, piece in ipairs(map.npc_pieces or {}) do
         if piece.npc and not piece._removed then
@@ -1338,28 +1514,6 @@ local function draw_hit_debug(map, lg, layout, view_rect)
                     scale
                 )
 
-                lg.setColor(0.35, 0.75, 1, 0.85)
-                lg.rectangle("line", x0, y0, x1 - x0, y1 - y0)
-            end
-        end
-    end
-
-    for _, piece in ipairs(map.structure_pieces or {}) do
-        if not piece._removed and Structure.is_piece(piece) then
-            local def = cfg().structures[piece.structure]
-
-            if def then
-                local feet_x, feet_y = structure_feet_screen(map, layout, piece, z_at)
-                local hit_w, hit_h = resolve_hit_size(def)
-                local x0, y0, x1, y1 = aabb_hit_bounds(
-                    feet_x,
-                    feet_y,
-                    hit_w,
-                    hit_h,
-                    scale
-                )
-
-                lg.setColor(1, 0.45, 0.9, 0.85)
                 lg.rectangle("line", x0, y0, x1 - x0, y1 - y0)
             end
         end
@@ -1484,7 +1638,7 @@ function M.draw_map()
         )
     end
 
-    Terrain.draw(current_map)
+    Terrain.draw(current_map, view_rect)
 
     entry_pool_reset()
     local buckets = {}
@@ -1547,10 +1701,12 @@ function M.draw_map()
         end
     end
 
-    draw_placement_debug(current_map, lg, layout, view_rect)
-    draw_npc_pos_debug(current_map, lg, layout, view_rect)
-    draw_hit_debug(current_map, lg, layout, view_rect)
-    draw_pick_marker(lg, layout)
+    if cfg().debug_draw_map then
+        draw_placement_debug(current_map, lg)
+        draw_npc_pos_debug(current_map, lg, layout, view_rect)
+        draw_hit_debug(current_map, lg, layout, view_rect, cache)
+        draw_pick_marker(lg, layout)
+    end
 
     love.graphics.pop()
 end
@@ -1579,6 +1735,7 @@ end
 
 function M.set_debug_draw_map(enable)
     cfg().debug_draw_map = enable and true or false
+    refresh_debug_draw_cache(current_map)
 end
 
 function M.debug_draw_map()
@@ -1622,10 +1779,54 @@ local function map_pan_bounds(src, layout)
     return min_x - pad, min_y - pad, max_x + pad, max_y + pad
 end
 
-function M.load_map(src)
+function M.invalidate_terrain_cache()
+    if current_map then
+        current_map._terrain_cache = nil
+        current_map._terrain_cache_key = nil
+    end
+end
+
+local graphics_refresh_pending = false
+
+function M.queue_graphics_refresh()
+    graphics_refresh_pending = true
+end
+
+function M.flush_graphics_refresh()
+    if not graphics_refresh_pending then
+        return
+    end
+
+    graphics_refresh_pending = false
+    M.refresh_graphics_after_resize()
+end
+
+function M.refresh_graphics_after_resize()
+    local map = current_map
+
+    if not map then
+        return
+    end
+
+    M.invalidate_terrain_cache()
+
+    if cfg().terrain_bake then
+        for _, chunk in ipairs(map.terrain_chunks or {}) do
+            if chunk.canvas then
+                chunk.canvas:release()
+            end
+        end
+
+        Terrain.build_bake(map)
+    end
+
+    refresh_debug_draw_cache(map)
+end
+
+function M.load_map(src, opts)
     pick_marker = nil
     tile_highlights = nil
-    current_map = M.create_map(src)
+    current_map = M.create_map(src, opts)
     current_map._terrain_cache = nil
     current_map._terrain_cache_key = nil
     M.preload_npcs(src)
@@ -1644,6 +1845,26 @@ function M.load_map(src)
         view_h = c.design_height,
     })
     Camera.reset()
+end
+
+function M.load_map_begin(src)
+    M.load_map(src, { defer_bake = true })
+end
+
+function M.terrain_bake_pending()
+    local map = current_map
+
+    return map ~= nil and Terrain.bake_pending(map)
+end
+
+function M.process_terrain_bake(budget)
+    local map = current_map
+
+    if not map or not Terrain.bake_pending(map) then
+        return true, "Ready"
+    end
+
+    return Terrain.process_bake_queue(map, budget)
 end
 
 function M.find_by_id(id)
